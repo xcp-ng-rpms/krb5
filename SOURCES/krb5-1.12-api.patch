@@ -1,0 +1,34 @@
+From a609a605d87b3107de64141cd3d60c2a73c7b38f Mon Sep 17 00:00:00 2001
+From: Robbie Harwood <rharwood@redhat.com>
+Date: Fri, 22 Apr 2016 09:59:22 -0400
+Subject: [PATCH] krb5-1.12-api.patch
+
+---
+ src/lib/krb5/krb/princ_comp.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/lib/krb5/krb/princ_comp.c b/src/lib/krb5/krb/princ_comp.c
+index a6936107d..0ed78833b 100644
+--- a/src/lib/krb5/krb/princ_comp.c
++++ b/src/lib/krb5/krb/princ_comp.c
+@@ -36,6 +36,10 @@ realm_compare_flags(krb5_context context,
+     const krb5_data *realm1 = &princ1->realm;
+     const krb5_data *realm2 = &princ2->realm;
+ 
++    if (princ1 == NULL || princ2 == NULL)
++        return FALSE;
++    if (realm1 == NULL || realm2 == NULL)
++        return FALSE;
+     if (realm1->length != realm2->length)
+         return FALSE;
+     if (realm1->length == 0)
+@@ -88,6 +92,9 @@ krb5_principal_compare_flags(krb5_context context,
+     krb5_principal upn2 = NULL;
+     krb5_boolean ret = FALSE;
+ 
++    if (princ1 == NULL || princ2 == NULL)
++        return FALSE;
++
+     if (flags & KRB5_PRINCIPAL_COMPARE_ENTERPRISE) {
+         /* Treat UPNs as if they were real principals */
+         if (princ1->type == KRB5_NT_ENTERPRISE_PRINCIPAL) {

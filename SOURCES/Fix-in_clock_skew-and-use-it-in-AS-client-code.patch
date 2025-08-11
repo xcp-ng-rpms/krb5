@@ -1,0 +1,58 @@
+From 7e914206a676fb8f972c8021e97fab86a155488b Mon Sep 17 00:00:00 2001
+From: Greg Hudson <ghudson@mit.edu>
+Date: Mon, 24 Apr 2017 02:02:36 -0400
+Subject: [PATCH] Fix in_clock_skew() and use it in AS client code
+
+Add a context parameter to the in_clock_skew() macro so that it isn't
+implicitly relying on a local variable.  Use it in
+get_in_tkt.c:verify_as_reply().
+
+(cherry picked from commit 28a07a6461bb443b7fa75cc5cb859ad0db4cbb5a)
+---
+ src/lib/krb5/krb/gc_via_tkt.c | 2 +-
+ src/lib/krb5/krb/get_in_tkt.c | 4 ++--
+ src/lib/krb5/krb/int-proto.h  | 3 ++-
+ 3 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/lib/krb5/krb/gc_via_tkt.c b/src/lib/krb5/krb/gc_via_tkt.c
+index 4c0a1a461..c85d8b8d8 100644
+--- a/src/lib/krb5/krb/gc_via_tkt.c
++++ b/src/lib/krb5/krb/gc_via_tkt.c
+@@ -305,7 +305,7 @@ krb5int_process_tgs_reply(krb5_context context,
+         goto cleanup;
+ 
+     if (!in_cred->times.starttime &&
+-        !in_clock_skew(dec_rep->enc_part2->times.starttime,
++        !in_clock_skew(context, dec_rep->enc_part2->times.starttime,
+                        timestamp)) {
+         retval = KRB5_KDCREP_SKEW;
+         goto cleanup;
+diff --git a/src/lib/krb5/krb/get_in_tkt.c b/src/lib/krb5/krb/get_in_tkt.c
+index 54badbbc3..a058f5bd7 100644
+--- a/src/lib/krb5/krb/get_in_tkt.c
++++ b/src/lib/krb5/krb/get_in_tkt.c
+@@ -287,8 +287,8 @@ verify_as_reply(krb5_context            context,
+             return retval;
+     } else {
+         if ((request->from == 0) &&
+-            (labs(as_reply->enc_part2->times.starttime - time_now)
+-             > context->clockskew))
++            !in_clock_skew(context, as_reply->enc_part2->times.starttime,
++                           time_now))
+             return (KRB5_KDCREP_SKEW);
+     }
+     return 0;
+diff --git a/src/lib/krb5/krb/int-proto.h b/src/lib/krb5/krb/int-proto.h
+index 6da74858e..44eca359f 100644
+--- a/src/lib/krb5/krb/int-proto.h
++++ b/src/lib/krb5/krb/int-proto.h
+@@ -83,7 +83,8 @@ krb5int_construct_matching_creds(krb5_context context, krb5_flags options,
+                                  krb5_creds *in_creds, krb5_creds *mcreds,
+                                  krb5_flags *fields);
+ 
+-#define in_clock_skew(date, now) (labs((date)-(now)) < context->clockskew)
++#define in_clock_skew(context, date, now)               \
++    (labs((date) - (now)) < (context)->clockskew)
+ 
+ #define IS_TGS_PRINC(p) ((p)->length == 2 &&                            \
+                          data_eq_string((p)->data[0], KRB5_TGS_NAME))

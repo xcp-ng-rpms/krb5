@@ -1,0 +1,124 @@
+From 41b9111b48e53bf7864ed1f134e0433b070fa900 Mon Sep 17 00:00:00 2001
+From: Greg Hudson <ghudson@mit.edu>
+Date: Thu, 24 Aug 2017 11:11:46 -0400
+Subject: [PATCH] Fix certauth built-in module returns
+
+The PKINIT certauth eku module should never authoritatively authorize
+a certificate, because an extended key usage does not establish a
+relationship between the certificate and any specific user; it only
+establishes that the certificate was created for PKINIT client
+authentication.  Therefore, pkinit_eku_authorize() should return
+KRB5_PLUGIN_NO_HANDLE on success, not 0.
+
+The certauth san module should pass if it does not find any SANs of
+the types it can match against; the presence of other types of SANs
+should not cause it to explicitly deny a certificate.  Check for an
+empty result from crypto_retrieve_cert_sans() in verify_client_san(),
+instead of returning ENOENT from crypto_retrieve_cert_sans() when
+there are no SANs at all.
+
+ticket: 8561
+(cherry picked from commit 07243f85a760fb37f0622d7ff0177db3f19ab025)
+---
+ src/plugins/preauth/pkinit/pkinit_crypto_openssl.c | 39 ++++++++++------------
+ src/plugins/preauth/pkinit/pkinit_srv.c            | 14 +++++---
+ 2 files changed, 27 insertions(+), 26 deletions(-)
+
+diff --git a/src/plugins/preauth/pkinit/pkinit_crypto_openssl.c b/src/plugins/preauth/pkinit/pkinit_crypto_openssl.c
+index 70e230ec2..7fa2efd21 100644
+--- a/src/plugins/preauth/pkinit/pkinit_crypto_openssl.c
++++ b/src/plugins/preauth/pkinit/pkinit_crypto_openssl.c
+@@ -2137,7 +2137,6 @@ crypto_retrieve_X509_sans(krb5_context context,
+ 
+     if (!(ext = X509_get_ext(cert, l)) || !(ialt = X509V3_EXT_d2i(ext))) {
+         pkiDebug("%s: found no subject alt name extensions\n", __FUNCTION__);
+-        retval = ENOENT;
+         goto cleanup;
+     }
+     num_sans = sk_GENERAL_NAME_num(ialt);
+@@ -2240,31 +2239,29 @@ crypto_retrieve_X509_sans(krb5_context context,
+     sk_GENERAL_NAME_pop_free(ialt, GENERAL_NAME_free);
+ 
+     retval = 0;
+-    if (princs)
++    if (princs != NULL && *princs != NULL) {
+         *princs_ret = princs;
+-    if (upns)
++        princs = NULL;
++    }
++    if (upns != NULL && *upns != NULL) {
+         *upn_ret = upns;
+-    if (dnss)
++        upns = NULL;
++    }
++    if (dnss != NULL && *dnss != NULL) {
+         *dns_ret = dnss;
++        dnss = NULL;
++    }
+ 
+ cleanup:
+-    if (retval) {
+-        if (princs != NULL) {
+-            for (i = 0; princs[i] != NULL; i++)
+-                krb5_free_principal(context, princs[i]);
+-            free(princs);
+-        }
+-        if (upns != NULL) {
+-            for (i = 0; upns[i] != NULL; i++)
+-                krb5_free_principal(context, upns[i]);
+-            free(upns);
+-        }
+-        if (dnss != NULL) {
+-            for (i = 0; dnss[i] != NULL; i++)
+-                free(dnss[i]);
+-            free(dnss);
+-        }
+-    }
++    for (i = 0; princs != NULL && princs[i] != NULL; i++)
++        krb5_free_principal(context, princs[i]);
++    free(princs);
++    for (i = 0; upns != NULL && upns[i] != NULL; i++)
++        krb5_free_principal(context, upns[i]);
++    free(upns);
++    for (i = 0; dnss != NULL && dnss[i] != NULL; i++)
++        free(dnss[i]);
++    free(dnss);
+     return retval;
+ }
+ 
+diff --git a/src/plugins/preauth/pkinit/pkinit_srv.c b/src/plugins/preauth/pkinit/pkinit_srv.c
+index 9c6e96c9e..8e77606f8 100644
+--- a/src/plugins/preauth/pkinit/pkinit_srv.c
++++ b/src/plugins/preauth/pkinit/pkinit_srv.c
+@@ -187,14 +187,18 @@ verify_client_san(krb5_context context,
+                                        &princs,
+                                        plgctx->opts->allow_upn ? &upns : NULL,
+                                        NULL);
+-    if (retval == ENOENT) {
+-        TRACE_PKINIT_SERVER_NO_SAN(context);
+-        goto out;
+-    } else if (retval) {
++    if (retval) {
+         pkiDebug("%s: error from retrieve_certificate_sans()\n", __FUNCTION__);
+         retval = KRB5KDC_ERR_CLIENT_NAME_MISMATCH;
+         goto out;
+     }
++
++    if (princs == NULL && upns == NULL) {
++        TRACE_PKINIT_SERVER_NO_SAN(context);
++        retval = ENOENT;
++        goto out;
++    }
++
+     /* XXX Verify this is consistent with client side XXX */
+ #if 0
+     retval = call_san_checking_plugins(context, plgctx, reqctx, princs,
+@@ -1495,7 +1499,7 @@ pkinit_eku_authorize(krb5_context context, krb5_certauth_moddata moddata,
+         return KRB5KDC_ERR_INCONSISTENT_KEY_PURPOSE;
+     }
+ 
+-    return 0;
++    return KRB5_PLUGIN_NO_HANDLE;
+ }
+ 
+ static krb5_error_code

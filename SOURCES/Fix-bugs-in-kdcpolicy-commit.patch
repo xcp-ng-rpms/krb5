@@ -1,0 +1,130 @@
+From d59b00fd1fdcc473739f3033c0f67eb402f20d9c Mon Sep 17 00:00:00 2001
+From: Greg Hudson <ghudson@mit.edu>
+Date: Sat, 19 Aug 2017 19:09:24 -0400
+Subject: [PATCH] Fix bugs in kdcpolicy commit
+
+Commit d0969f6a8170344031ef58fd2a161190f1edfb96 added tests using
+"klist ccachname -e", which does not work with a POSIX-conformant
+getopt() implementation such as the one in Solaris.  Fix
+t_kdcpolicy.py to use "klist -e ccachename" instead.
+
+The tests could fail if the clock second rolled over between kinit and
+kvno.  Divide service ticket maximum lifetimes by 2 in the test module
+to correctly exercise TGS policy restrictions and ensure that service
+tickets are not constrained by the TGT end time.
+
+Also use the correct trace macro when a kdcpolicy module declines to
+initialize (my mistake when revising the commit, noted by rharwood).
+
+ticket: 8606
+(cherry picked from commit 09acbd91efc6df54e1572285ffc94c6acb3a9113)
+---
+ src/kdc/policy.c                  |  2 +-
+ src/plugins/kdcpolicy/test/main.c | 10 +++++-----
+ src/tests/t_kdcpolicy.py          | 13 +++++++++----
+ 3 files changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/src/kdc/policy.c b/src/kdc/policy.c
+index e49644e06..26c16f97c 100644
+--- a/src/kdc/policy.c
++++ b/src/kdc/policy.c
+@@ -222,7 +222,7 @@ load_kdcpolicy_plugins(krb5_context context)
+         if (h->vt.init != NULL) {
+             ret = h->vt.init(context, &h->moddata);
+             if (ret == KRB5_PLUGIN_NO_HANDLE) {
+-                TRACE_KADM5_AUTH_INIT_SKIP(context, h->vt.name);
++                TRACE_KDCPOLICY_INIT_SKIP(context, h->vt.name);
+                 free(h);
+                 continue;
+             }
+diff --git a/src/plugins/kdcpolicy/test/main.c b/src/plugins/kdcpolicy/test/main.c
+index eb8fde053..86c808958 100644
+--- a/src/plugins/kdcpolicy/test/main.c
++++ b/src/plugins/kdcpolicy/test/main.c
+@@ -35,7 +35,7 @@
+ #include <krb5/kdcpolicy_plugin.h>
+ 
+ static krb5_error_code
+-output_from_indicator(const char *const *auth_indicators,
++output_from_indicator(const char *const *auth_indicators, int divisor,
+                       krb5_deltat *lifetime_out,
+                       krb5_deltat *renew_lifetime_out,
+                       const char **status)
+@@ -46,11 +46,11 @@ output_from_indicator(const char *const *auth_indicators,
+     }
+ 
+     if (strcmp(auth_indicators[0], "ONE_HOUR") == 0) {
+-        *lifetime_out = 3600;
++        *lifetime_out = 3600 / divisor;
+         *renew_lifetime_out = *lifetime_out * 2;
+         return 0;
+     } else if (strcmp(auth_indicators[0], "SEVEN_HOURS") == 0) {
+-        *lifetime_out = 7 * 3600;
++        *lifetime_out = 7 * 3600 / divisor;
+         *renew_lifetime_out = *lifetime_out * 2;
+         return 0;
+     }
+@@ -71,7 +71,7 @@ test_check_as(krb5_context context, krb5_kdcpolicy_moddata moddata,
+         *status = "LOCAL_POLICY";
+         return KRB5KDC_ERR_POLICY;
+     }
+-    return output_from_indicator(auth_indicators, lifetime_out,
++    return output_from_indicator(auth_indicators, 1, lifetime_out,
+                                  renew_lifetime_out, status);
+ }
+ 
+@@ -87,7 +87,7 @@ test_check_tgs(krb5_context context, krb5_kdcpolicy_moddata moddata,
+         *status = "LOCAL_POLICY";
+         return KRB5KDC_ERR_POLICY;
+     }
+-    return output_from_indicator(auth_indicators, lifetime_out,
++    return output_from_indicator(auth_indicators, 2, lifetime_out,
+                                  renew_lifetime_out, status);
+ }
+ 
+diff --git a/src/tests/t_kdcpolicy.py b/src/tests/t_kdcpolicy.py
+index 6a745b959..b5d308461 100644
+--- a/src/tests/t_kdcpolicy.py
++++ b/src/tests/t_kdcpolicy.py
+@@ -18,16 +18,21 @@ realm.run([kadminl, 'addprinc', '-pw', password('fail'), 'fail'])
+ def verify_time(out, target_time):
+     times = re.findall(r'\d\d/\d\d/\d\d \d\d:\d\d:\d\d', out)
+     times = [datetime.strptime(t, '%m/%d/%y %H:%M:%S') for t in times]
++    divisor = 1
+     while len(times) > 0:
+         starttime = times.pop(0)
+         endtime = times.pop(0)
+         renewtime = times.pop(0)
+ 
+-        if str(endtime - starttime) != target_time:
++        if str((endtime - starttime) * divisor) != target_time:
+             fail('unexpected lifetime value')
+-        if str(renewtime - endtime) != target_time:
++        if str((renewtime - endtime) * divisor) != target_time:
+             fail('unexpected renewable value')
+ 
++        # Service tickets should have half the lifetime of initial
++        # tickets.
++        divisor = 2
++
+ rflags = ['-r', '1d', '-l', '12h']
+ 
+ # Test AS+TGS success path.
+@@ -35,7 +40,7 @@ realm.kinit(realm.user_princ, password('user'),
+             rflags + ['-X', 'indicators=SEVEN_HOURS'])
+ realm.run([kvno, realm.host_princ])
+ realm.run(['./adata', realm.host_princ], expected_msg='+97: [SEVEN_HOURS]')
+-out = realm.run([klist, realm.ccache, '-e'])
++out = realm.run([klist, '-e', realm.ccache])
+ verify_time(out, '7:00:00')
+ 
+ # Test AS+TGS success path with different values.
+@@ -43,7 +48,7 @@ realm.kinit(realm.user_princ, password('user'),
+             rflags + ['-X', 'indicators=ONE_HOUR'])
+ realm.run([kvno, realm.host_princ])
+ realm.run(['./adata', realm.host_princ], expected_msg='+97: [ONE_HOUR]')
+-out = realm.run([klist, realm.ccache, '-e'])
++out = realm.run([klist, '-e', realm.ccache])
+ verify_time(out, '1:00:00')
+ 
+ # Test TGS failure path (using previous creds).

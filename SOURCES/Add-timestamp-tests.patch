@@ -1,0 +1,599 @@
+From 47999bb8735f653f06e0eb46e7eced600210b9da Mon Sep 17 00:00:00 2001
+From: Greg Hudson <ghudson@mit.edu>
+Date: Sat, 29 Apr 2017 17:30:36 -0400
+Subject: [PATCH] Add timestamp tests
+
+Add a test program for krb5int_validate_times() covering cases before
+and across the y2038 boundary.  Add a GSSAPI test program to exercise
+lifetime queries, and tests using it in t_gssapi.py for ticket end
+times after y2038.  Add a new test script t_y2038.py which only runs
+on platforms with 64-bit time_t to exercise end-user operations across
+and after y2038.  Add an LDAP test case to test storage of post-y2038
+timestamps.
+
+ticket: 8352
+(cherry picked from commit 8ca62e54e89e2fbd6a089e8ab20b4e374a486003)
+[rharwood@redhat.com: prune gitignore]
+---
+ src/Makefile.in                  |   1 +
+ src/config/pre.in                |   2 +
+ src/configure.in                 |   3 +
+ src/lib/krb5/krb/Makefile.in     |  14 ++--
+ src/lib/krb5/krb/t_valid_times.c | 109 ++++++++++++++++++++++++++++++
+ src/tests/Makefile.in            |   1 +
+ src/tests/gssapi/Makefile.in     |  27 ++++----
+ src/tests/gssapi/t_gssapi.py     |  32 +++++++++
+ src/tests/gssapi/t_lifetime.c    | 140 +++++++++++++++++++++++++++++++++++++++
+ src/tests/t_kdb.py               |   7 ++
+ src/tests/t_y2038.py             |  75 +++++++++++++++++++++
+ 11 files changed, 395 insertions(+), 16 deletions(-)
+ create mode 100644 src/lib/krb5/krb/t_valid_times.c
+ create mode 100644 src/tests/gssapi/t_lifetime.c
+ create mode 100644 src/tests/t_y2038.py
+
+diff --git a/src/Makefile.in b/src/Makefile.in
+index b0249778c..ad8565056 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -521,6 +521,7 @@ pyrunenv.vals: Makefile
+ 	done > $@
+ 	echo "tls_impl = '$(TLS_IMPL)'" >> $@
+ 	echo "have_sasl = '$(HAVE_SASL)'" >> $@
++	echo "sizeof_time_t = $(SIZEOF_TIME_T)" >> $@
+ 
+ runenv.py: pyrunenv.vals
+ 	echo 'env = {}' > $@
+diff --git a/src/config/pre.in b/src/config/pre.in
+index d961b5621..f23c07d9d 100644
+--- a/src/config/pre.in
++++ b/src/config/pre.in
+@@ -452,6 +452,8 @@ HAVE_SASL = @HAVE_SASL@
+ # Whether we have libresolv 1.1.5 for URI discovery tests
+ HAVE_RESOLV_WRAPPER = @HAVE_RESOLV_WRAPPER@
+ 
++SIZEOF_TIME_T = @SIZEOF_TIME_T@
++
+ # error table rules
+ #
+ ### /* these are invoked as $(...) foo.et, which works, but could be better */
+diff --git a/src/configure.in b/src/configure.in
+index 24f653f0d..4ae2c07d5 100644
+--- a/src/configure.in
++++ b/src/configure.in
+@@ -744,6 +744,9 @@ fi
+ 
+ AC_HEADER_TIME
+ AC_CHECK_TYPE(time_t, long)
++AC_CHECK_SIZEOF(time_t)
++SIZEOF_TIME_T=$ac_cv_sizeof_time_t
++AC_SUBST(SIZEOF_TIME_T)
+ 
+ # Determine where to put the replay cache.
+ 
+diff --git a/src/lib/krb5/krb/Makefile.in b/src/lib/krb5/krb/Makefile.in
+index 0fe02a95d..55f82b147 100644
+--- a/src/lib/krb5/krb/Makefile.in
++++ b/src/lib/krb5/krb/Makefile.in
+@@ -364,6 +364,7 @@ SRCS=	$(srcdir)/addr_comp.c	\
+ 	$(srcdir)/t_in_ccache.c	\
+ 	$(srcdir)/t_response_items.c \
+ 	$(srcdir)/t_sname_match.c \
++	$(srcdir)/t_valid_times.c \
+ 	$(srcdir)/t_vfy_increds.c
+ 
+ # Someday, when we have a "maintainer mode", do this right:
+@@ -457,9 +458,12 @@ t_response_items: t_response_items.o response_items.o $(KRB5_BASE_DEPLIBS)
+ t_sname_match: t_sname_match.o sname_match.o $(KRB5_BASE_DEPLIBS)
+ 	$(CC_LINK) -o $@ t_sname_match.o sname_match.o $(KRB5_BASE_LIBS)
+ 
++t_valid_times: t_valid_times.o valid_times.o $(KRB5_BASE_DEPLIBS)
++	$(CC_LINK) -o $@ t_valid_times.o valid_times.o $(KRB5_BASE_LIBS)
++
+ TEST_PROGS= t_walk_rtree t_kerb t_ser t_deltat t_expand t_authdata t_pac \
+-	t_in_ccache t_cc_config t_copy_context \
+-	t_princ t_etypes t_vfy_increds t_response_items t_sname_match
++	t_in_ccache t_cc_config t_copy_context t_princ t_etypes t_vfy_increds \
++	t_response_items t_sname_match t_valid_times
+ 
+ check-unix: $(TEST_PROGS)
+ 	$(RUN_TEST_LOCAL_CONF) ./t_kerb \
+@@ -496,6 +500,7 @@ check-unix: $(TEST_PROGS)
+ 	$(RUN_TEST) ./t_response_items
+ 	$(RUN_TEST) ./t_copy_context
+ 	$(RUN_TEST) ./t_sname_match
++	$(RUN_TEST) ./t_valid_times
+ 
+ check-pytests: t_expire_warn t_vfy_increds
+ 	$(RUNPYTEST) $(srcdir)/t_expire_warn.py $(PYTESTFLAGS)
+@@ -522,8 +527,9 @@ clean:
+ 	$(OUTPRE)t_ad_fx_armor$(EXEEXT) $(OUTPRE)t_ad_fx_armor.$(OBJEXT) \
+ 	$(OUTPRE)t_vfy_increds$(EXEEXT) $(OUTPRE)t_vfy_increds.$(OBJEXT) \
+ 	$(OUTPRE)t_response_items$(EXEEXT) \
+-	$(OUTPRE)t_response_items.$(OBJEXT) $(OUTPRE)t_sname_match$(EXEEXT) \
+-	$(OUTPRE)t_sname_match.$(OBJEXT) \
++	$(OUTPRE)t_response_items.$(OBJEXT) \
++	$(OUTPRE)t_sname_match$(EXEEXT) $(OUTPRE)t_sname_match.$(OBJEXT) \
++	$(OUTPRE)t_valid_times$(EXEEXT) $(OUTPRE)t_valid_times.$(OBJECT) \
+ 	$(OUTPRE)t_parse_host_string$(EXEEXT) \
+ 	$(OUTPRE)t_parse_host_string.$(OBJEXT)
+ 
+diff --git a/src/lib/krb5/krb/t_valid_times.c b/src/lib/krb5/krb/t_valid_times.c
+new file mode 100644
+index 000000000..1b469ffc2
+--- /dev/null
++++ b/src/lib/krb5/krb/t_valid_times.c
+@@ -0,0 +1,109 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* lib/krb5/krb/t_valid_times.c - test program for krb5int_validate_times() */
++/*
++ * Copyright (C) 2017 by the Massachusetts Institute of Technology.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "k5-int.h"
++#include "int-proto.h"
++
++#define BOUNDARY (uint32_t)INT32_MIN
++
++int
++main()
++{
++    krb5_error_code ret;
++    krb5_context context;
++    krb5_ticket_times times = { 0, 0, 0, 0 };
++
++    ret = krb5_init_context(&context);
++    assert(!ret);
++
++    /* Current time is within authtime and end time. */
++    ret = krb5_set_debugging_time(context, 1000, 0);
++    times.authtime = 500;
++    times.endtime = 1500;
++    ret = krb5int_validate_times(context, &times);
++    assert(!ret);
++
++    /* Current time is before starttime, but within clock skew. */
++    times.starttime = 1100;
++    ret = krb5int_validate_times(context, &times);
++    assert(!ret);
++
++    /* Current time is before starttime by more than clock skew. */
++    times.starttime = 1400;
++    ret = krb5int_validate_times(context, &times);
++    assert(ret == KRB5KRB_AP_ERR_TKT_NYV);
++
++    /* Current time is after end time, but within clock skew. */
++    times.starttime = 500;
++    times.endtime = 800;
++    ret = krb5int_validate_times(context, &times);
++    assert(!ret);
++
++    /* Current time is after end time by more than clock skew. */
++    times.endtime = 600;
++    ret = krb5int_validate_times(context, &times);
++    assert(ret == KRB5KRB_AP_ERR_TKT_EXPIRED);
++
++    /* Current time is within starttime and endtime; current time and
++     * endtime are across y2038 boundary. */
++    ret = krb5_set_debugging_time(context, BOUNDARY - 100, 0);
++    assert(!ret);
++    times.starttime = BOUNDARY - 200;
++    times.endtime = BOUNDARY + 500;
++    ret = krb5int_validate_times(context, &times);
++    assert(!ret);
++
++    /* Current time is before starttime, but by less than clock skew. */
++    times.starttime = BOUNDARY + 100;
++    ret = krb5int_validate_times(context, &times);
++    assert(!ret);
++
++    /* Current time is before starttime by more than clock skew. */
++    times.starttime = BOUNDARY + 250;
++    ret = krb5int_validate_times(context, &times);
++    assert(ret == KRB5KRB_AP_ERR_TKT_NYV);
++
++    /* Current time is after endtime, but by less than clock skew. */
++    ret = krb5_set_debugging_time(context, BOUNDARY + 100, 0);
++    assert(!ret);
++    times.starttime = BOUNDARY - 1000;
++    times.endtime = BOUNDARY - 100;
++    ret = krb5int_validate_times(context, &times);
++    assert(!ret);
++
++    /* Current time is after endtime by more than clock skew. */
++    times.endtime = BOUNDARY - 300;
++    ret = krb5int_validate_times(context, &times);
++    assert(ret == KRB5KRB_AP_ERR_TKT_EXPIRED);
++
++    return 0;
++}
+diff --git a/src/tests/Makefile.in b/src/tests/Makefile.in
+index 0e93d6b59..2b3112537 100644
+--- a/src/tests/Makefile.in
++++ b/src/tests/Makefile.in
+@@ -168,6 +168,7 @@ check-pytests: localauth plugorder rdreq responder s2p s4u2proxy unlockiter
+ 	$(RUNPYTEST) $(srcdir)/t_princflags.py $(PYTESTFLAGS)
+ 	$(RUNPYTEST) $(srcdir)/t_tabdump.py $(PYTESTFLAGS)
+ 	$(RUNPYTEST) $(srcdir)/t_certauth.py $(PYTESTFLAGS)
++	$(RUNPYTEST) $(srcdir)/t_y2038.py $(PYTESTFLAGS)
+ 
+ clean:
+ 	$(RM) adata etinfo forward gcred hist hooks hrealm icred kdbtest
+diff --git a/src/tests/gssapi/Makefile.in b/src/tests/gssapi/Makefile.in
+index 6c1464297..604f926de 100644
+--- a/src/tests/gssapi/Makefile.in
++++ b/src/tests/gssapi/Makefile.in
+@@ -15,15 +15,16 @@ SRCS=	$(srcdir)/ccinit.c $(srcdir)/ccrefresh.c $(srcdir)/common.c \
+ 	$(srcdir)/t_gssexts.c $(srcdir)/t_imp_cred.c $(srcdir)/t_imp_name.c \
+ 	$(srcdir)/t_invalid.c $(srcdir)/t_inq_cred.c $(srcdir)/t_inq_ctx.c \
+ 	$(srcdir)/t_inq_mechs_name.c $(srcdir)/t_iov.c \
+-	$(srcdir)/t_namingexts.c $(srcdir)/t_oid.c $(srcdir)/t_pcontok.c \
+-	$(srcdir)/t_prf.c $(srcdir)/t_s4u.c $(srcdir)/t_s4u2proxy_krb5.c \
+-	$(srcdir)/t_saslname.c $(srcdir)/t_spnego.c $(srcdir)/t_srcattrs.c
++	$(srcdir)/t_lifetime.c $(srcdir)/t_namingexts.c $(srcdir)/t_oid.c \
++	$(srcdir)/t_pcontok.c $(srcdir)/t_prf.c $(srcdir)/t_s4u.c \
++	$(srcdir)/t_s4u2proxy_krb5.c $(srcdir)/t_saslname.c \
++	$(srcdir)/t_spnego.c $(srcdir)/t_srcattrs.c
+ 
+ OBJS=	ccinit.o ccrefresh.o common.o t_accname.o t_ccselect.o t_ciflags.o \
+ 	t_credstore.o t_enctypes.o t_err.o t_export_cred.o t_export_name.o \
+ 	t_gssexts.o t_imp_cred.o t_imp_name.o t_invalid.o t_inq_cred.o \
+-	t_inq_ctx.o t_inq_mechs_name.o t_iov.o t_namingexts.o t_oid.o \
+-	t_pcontok.o t_prf.o t_s4u.o t_s4u2proxy_krb5.o t_saslname.o \
++	t_inq_ctx.o t_inq_mechs_name.o t_iov.o t_lifetime.o t_namingexts.o \
++	t_oid.o t_pcontok.o t_prf.o t_s4u.o t_s4u2proxy_krb5.o t_saslname.o \
+ 	t_spnego.o t_srcattrs.o
+ 
+ COMMON_DEPS= common.o $(GSS_DEPLIBS) $(KRB5_BASE_DEPLIBS)
+@@ -31,9 +32,9 @@ COMMON_LIBS= common.o $(GSS_LIBS) $(KRB5_BASE_LIBS)
+ 
+ all: ccinit ccrefresh t_accname t_ccselect t_ciflags t_credstore t_enctypes \
+ 	t_err t_export_cred t_export_name t_gssexts t_imp_cred t_imp_name \
+-	t_invalid t_inq_cred t_inq_ctx t_inq_mechs_name t_iov t_namingexts \
+-	t_oid t_pcontok t_prf t_s4u t_s4u2proxy_krb5 t_saslname t_spnego \
+-	t_srcattrs
++	t_invalid t_inq_cred t_inq_ctx t_inq_mechs_name t_iov t_lifetime \
++	t_namingexts t_oid t_pcontok t_prf t_s4u t_s4u2proxy_krb5 t_saslname \
++	t_spnego t_srcattrs
+ 
+ check-unix: t_oid
+ 	$(RUN_TEST) ./t_invalid
+@@ -42,8 +43,8 @@ check-unix: t_oid
+ 
+ check-pytests: ccinit ccrefresh t_accname t_ccselect t_ciflags t_credstore \
+ 	t_enctypes t_err t_export_cred t_export_name t_imp_cred t_inq_cred \
+-	t_inq_ctx t_inq_mechs_name t_iov t_pcontok t_s4u t_s4u2proxy_krb5 \
+-	t_spnego t_srcattrs
++	t_inq_ctx t_inq_mechs_name t_iov t_lifetime t_pcontok t_s4u \
++	t_s4u2proxy_krb5 t_spnego t_srcattrs
+ 	$(RUNPYTEST) $(srcdir)/t_gssapi.py $(PYTESTFLAGS)
+ 	$(RUNPYTEST) $(srcdir)/t_ccselect.py $(PYTESTFLAGS)
+ 	$(RUNPYTEST) $(srcdir)/t_client_keytab.py $(PYTESTFLAGS)
+@@ -88,6 +89,8 @@ t_inq_mechs_name: t_inq_mechs_name.o $(COMMON_DEPS)
+ 	$(CC_LINK) -o $@ t_inq_mechs_name.o $(COMMON_LIBS)
+ t_iov: t_iov.o $(COMMON_DEPS)
+ 	$(CC_LINK) -o $@ t_iov.o $(COMMON_LIBS)
++t_lifetime: t_lifetime.o $(COMMON_DEPS)
++	$(CC_LINK) -o $@ t_lifetime.o $(COMMON_LIBS)
+ t_namingexts: t_namingexts.o $(COMMON_DEPS)
+ 	$(CC_LINK) -o $@ t_namingexts.o $(COMMON_LIBS)
+ t_pcontok: t_pcontok.o $(COMMON_DEPS)
+@@ -111,5 +114,5 @@ clean:
+ 	$(RM) ccinit ccrefresh t_accname t_ccselect t_ciflags t_credstore
+ 	$(RM) t_enctypes t_err t_export_cred t_export_name t_gssexts t_imp_cred
+ 	$(RM) t_imp_name t_invalid t_inq_cred t_inq_ctx t_inq_mechs_name t_iov
+-	$(RM) t_namingexts t_oid t_pcontok t_prf t_s4u t_s4u2proxy_krb5
+-	$(RM) t_saslname t_spnego t_srcattrs
++	$(RM) t_lifetime t_namingexts t_oid t_pcontok t_prf t_s4u
++	$(RM) t_s4u2proxy_krb5 t_saslname t_spnego t_srcattrs
+diff --git a/src/tests/gssapi/t_gssapi.py b/src/tests/gssapi/t_gssapi.py
+index e23c936d7..fa214242f 100755
+--- a/src/tests/gssapi/t_gssapi.py
++++ b/src/tests/gssapi/t_gssapi.py
+@@ -220,4 +220,36 @@ realm.run(['./t_ciflags', 'p:' + realm.host_princ])
+ # contexts.
+ realm.run(['./t_inq_ctx', 'user', password('user'), 'p:%s' % realm.host_princ])
+ 
++# Test lifetime results, using a realm with a large maximum lifetime
++# so that we can test ticket end dates after y2038.  There are no
++# time_t conversions involved, so we can run these tests on platforms
++# with 32-bit time_t.
++realm.stop()
++conf = {'realms': {'$realm': {'max_life': '9000d'}}}
++realm = K5Realm(kdc_conf=conf, get_creds=False)
++
++# Check a lifetime string result against an expected number value (or None).
++# Allow some variance due to time elapsed during the tests.
++def check_lifetime(msg, val, expected):
++    if expected is None and val != 'indefinite':
++        fail('%s: expected indefinite, got %s' % (msg, val))
++    if expected is not None and val == 'indefinite':
++        fail('%s: expected %d, got indefinite' % (msg, expected))
++    if expected is not None and abs(int(val) - expected) > 100:
++        fail('%s: expected %d, got %s' % (msg, expected, val))
++
++realm.kinit(realm.user_princ, password('user'), flags=['-l', '8500d'])
++out = realm.run(['./t_lifetime', 'p:' + realm.host_princ, str(8000 * 86400)])
++ln = out.split('\n')
++check_lifetime('icred gss_acquire_cred', ln[0], 8500 * 86400)
++check_lifetime('icred gss_inquire_cred', ln[1], 8500 * 86400)
++check_lifetime('acred gss_acquire_cred', ln[2], None)
++check_lifetime('acred gss_inquire_cred', ln[3], None)
++check_lifetime('ictx gss_init_sec_context', ln[4], 8000 * 86400)
++check_lifetime('ictx gss_inquire_context', ln[5], 8000 * 86400)
++check_lifetime('ictx gss_context_time', ln[6], 8000 * 86400)
++check_lifetime('actx gss_accept_sec_context', ln[7], 8000 * 86400 + 300)
++check_lifetime('actx gss_inquire_context', ln[8], 8000 * 86400 + 300)
++check_lifetime('actx gss_context_time', ln[9], 8000 * 86400 + 300)
++
+ success('GSSAPI tests')
+diff --git a/src/tests/gssapi/t_lifetime.c b/src/tests/gssapi/t_lifetime.c
+new file mode 100644
+index 000000000..8dcf18621
+--- /dev/null
++++ b/src/tests/gssapi/t_lifetime.c
+@@ -0,0 +1,140 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* tests/gssapi/t_lifetime.c - display cred and context lifetimes */
++/*
++ * Copyright (C) 2017 by the Massachusetts Institute of Technology.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <assert.h>
++#include "common.h"
++
++/*
++ * Using the default credential, exercise the GSS functions which accept or
++ * produce lifetimes.  Display the following results, one per line, as ASCII
++ * integers or the string "indefinite":
++ *
++ *   initiator cred lifetime according to gss_acquire_cred()
++ *   initiator cred lifetime according to gss_inquire_cred()
++ *   acceptor cred lifetime according to gss_acquire_cred()
++ *   acceptor cred lifetime according to gss_inquire_cred()
++ *   initiator context lifetime according to gss_init_sec_context()
++ *   initiator context lifetime according to gss_inquire_context()
++ *   initiator context lifetime according to gss_context_time()
++ *   acceptor context lifetime according to gss_init_sec_context()
++ *   acceptor context lifetime according to gss_inquire_context()
++ *   acceptor context lifetime according to gss_context_time()
++ */
++
++static void
++display_time(OM_uint32 tval)
++{
++    if (tval == GSS_C_INDEFINITE)
++        puts("indefinite");
++    else
++        printf("%u\n", (unsigned int)tval);
++}
++
++int
++main(int argc, char *argv[])
++{
++    OM_uint32 minor, major;
++    gss_cred_id_t icred, acred;
++    gss_name_t tname;
++    gss_ctx_id_t ictx = GSS_C_NO_CONTEXT, actx = GSS_C_NO_CONTEXT;
++    gss_buffer_desc itok = GSS_C_EMPTY_BUFFER, atok = GSS_C_EMPTY_BUFFER;
++    OM_uint32 time_req = GSS_C_INDEFINITE, time_rec;
++
++    if (argc < 2 || argc > 3) {
++        fprintf(stderr, "Usage: %s targetname [time_req]\n", argv[0]);
++        return 1;
++    }
++    tname = import_name(argv[1]);
++    if (argc >= 3)
++        time_req = atoll(argv[2]);
++
++    /* Get initiator cred and display its lifetime according to
++     * gss_acquire_cred and gss_inquire_cred. */
++    major = gss_acquire_cred(&minor, GSS_C_NO_NAME, time_req, &mechset_krb5,
++                             GSS_C_INITIATE, &icred, NULL, &time_rec);
++    check_gsserr("gss_acquire_cred(initiate)", major, minor);
++    display_time(time_rec);
++    major = gss_inquire_cred(&minor, icred, NULL, &time_rec, NULL, NULL);
++    check_gsserr("gss_inquire_cred(initiate)", major, minor);
++    display_time(time_rec);
++
++    /* Get acceptor cred and display its lifetime according to gss_acquire_cred
++     * and gss_inquire_cred. */
++    major = gss_acquire_cred(&minor, GSS_C_NO_NAME, time_req, &mechset_krb5,
++                             GSS_C_ACCEPT, &acred, NULL, &time_rec);
++    check_gsserr("gss_acquire_cred(accept)", major, minor);
++    display_time(time_rec);
++    major = gss_inquire_cred(&minor, acred, NULL, &time_rec, NULL, NULL);
++    check_gsserr("gss_inquire_cred(accept)", major, minor);
++    display_time(time_rec);
++
++    /* Make an initiator context and display its lifetime according to
++     * gss_init_sec_context, gss_inquire_context, and gss_context_time. */
++    major = gss_init_sec_context(&minor, icred, &ictx, tname, &mech_krb5, 0,
++                                 time_req, GSS_C_NO_CHANNEL_BINDINGS, &atok,
++                                 NULL, &itok, NULL, &time_rec);
++    check_gsserr("gss_init_sec_context", major, minor);
++    assert(major == GSS_S_COMPLETE);
++    display_time(time_rec);
++    major = gss_inquire_context(&minor, ictx, NULL, NULL, &time_rec, NULL,
++                                NULL, NULL, NULL);
++    check_gsserr("gss_inquire_context(initiate)", major, minor);
++    display_time(time_rec);
++    major = gss_context_time(&minor, ictx, &time_rec);
++    check_gsserr("gss_context_time(initiate)", major, minor);
++    display_time(time_rec);
++
++    major = gss_accept_sec_context(&minor, &actx, acred, &itok,
++                                   GSS_C_NO_CHANNEL_BINDINGS, NULL,
++                                   NULL, &atok, NULL, &time_rec, NULL);
++    check_gsserr("gss_accept_sec_context", major, minor);
++    assert(major == GSS_S_COMPLETE);
++    display_time(time_rec);
++    major = gss_inquire_context(&minor, actx, NULL, NULL, &time_rec, NULL,
++                                NULL, NULL, NULL);
++    check_gsserr("gss_inquire_context(accept)", major, minor);
++    display_time(time_rec);
++    major = gss_context_time(&minor, actx, &time_rec);
++    check_gsserr("gss_context_time(accept)", major, minor);
++    display_time(time_rec);
++
++    (void)gss_release_buffer(&minor, &itok);
++    (void)gss_release_buffer(&minor, &atok);
++    (void)gss_release_name(&minor, &tname);
++    (void)gss_release_cred(&minor, &icred);
++    (void)gss_release_cred(&minor, &acred);
++    (void)gss_delete_sec_context(&minor, &ictx, NULL);
++    (void)gss_delete_sec_context(&minor, &actx, NULL);
++    return 0;
++}
+diff --git a/src/tests/t_kdb.py b/src/tests/t_kdb.py
+index 185225afa..c0eeb0118 100755
+--- a/src/tests/t_kdb.py
++++ b/src/tests/t_kdb.py
+@@ -446,6 +446,13 @@ realm.run([kadminl, 'addprinc', '-policy', 'keepoldpasspol', '-pw', 'aaaa',
+ for p in ('bbbb', 'cccc', 'aaaa'):
+     realm.run([kadminl, 'cpw', '-keepold', '-pw', p, 'keepoldpassprinc'])
+ 
++if runenv.sizeof_time_t <= 4:
++    skipped('y2038 LDAP test', 'platform has 32-bit time_t')
++else:
++    # Test storage of timestamps after y2038.
++    realm.run([kadminl, 'modprinc', '-pwexpire', '2040-02-03', 'user'])
++    realm.run([kadminl, 'getprinc', 'user'], expected_msg=' 2040\n')
++
+ realm.stop()
+ 
+ # Briefly test dump and load.
+diff --git a/src/tests/t_y2038.py b/src/tests/t_y2038.py
+new file mode 100644
+index 000000000..02e946df4
+--- /dev/null
++++ b/src/tests/t_y2038.py
+@@ -0,0 +1,75 @@
++#!/usr/bin/python
++from k5test import *
++
++# These tests will become much less important after the y2038 boundary
++# has elapsed, and may start exhibiting problems around the year 2075.
++
++if runenv.sizeof_time_t <= 4:
++    skip_rest('y2038 timestamp tests', 'platform has 32-bit time_t')
++
++# Start a KDC running roughly 21 years in the future, after the y2038
++# boundary.  Set long maximum lifetimes for later tests.
++conf = {'realms': {'$realm': {'max_life': '9000d',
++                              'max_renewable_life': '9000d'}}}
++realm = K5Realm(start_kdc=False, kdc_conf=conf)
++realm.start_kdc(['-T', '662256000'])
++
++# kinit without preauth should succeed with clock skew correction, but
++# will result in an expired ticket, because we sent an absolute end
++# time and didn't get a chance to correct it..
++realm.kinit(realm.user_princ, password('user'))
++realm.run([kvno, realm.host_princ], expected_code=1,
++          expected_msg='Ticket expired')
++
++# kinit with preauth should succeed and result in a valid ticket, as
++# we get a chance to correct the end time based on the KDC time.  Try
++# with encrypted timestamp and encrypted challenge.
++realm.run([kadminl, 'modprinc', '+requires_preauth', 'user'])
++realm.kinit(realm.user_princ, password('user'))
++realm.run([kvno, realm.host_princ])
++realm.kinit(realm.user_princ, password('user'), flags=['-T', realm.ccache])
++realm.run([kvno, realm.host_princ])
++
++# Test that expiration warning works after y2038, by setting a
++# password expiration time ten minutes after the KDC time.
++realm.run([kadminl, 'modprinc', '-pwexpire', '662256600 seconds', 'user'])
++out = realm.kinit(realm.user_princ, password('user'))
++if 'will expire in less than one hour' not in out:
++    fail('password expiration message')
++year = int(out.split()[-1])
++if year < 2038 or year > 9999:
++    fail('password expiration year')
++
++realm.stop_kdc()
++realm.start_kdc()
++realm.start_kadmind()
++realm.prep_kadmin()
++
++# Test getdate parsing of absolute timestamps after 2038 and
++# marshalling over the kadmin protocol.  The local time zone will
++# affect the display time by a little bit, so just look for the year.
++realm.run_kadmin(['modprinc', '-pwexpire', '2040-02-03', realm.host_princ])
++realm.run_kadmin(['getprinc', realm.host_princ], expected_msg=' 2040\n')
++
++# Get a ticket whose lifetime crosses the y2038 boundary and
++# range-check the expiration year as reported by klist.
++realm.kinit(realm.user_princ, password('user'),
++            flags=['-l', '8000d', '-r', '8500d'])
++realm.run([kvno, realm.host_princ])
++out = realm.run([klist])
++if int(out.split('\n')[4].split()[2].split('/')[2]) < 39:
++    fail('unexpected tgt expiration year')
++if int(out.split('\n')[5].split()[2].split('/')[2]) < 40:
++    fail('unexpected tgt rtill year')
++if int(out.split('\n')[6].split()[2].split('/')[2]) < 39:
++    fail('unexpected service ticket expiration year')
++if int(out.split('\n')[7].split()[2].split('/')[2]) < 40:
++    fail('unexpected service ticket rtill year')
++realm.kinit(realm.user_princ, None, ['-R'])
++out = realm.run([klist])
++if int(out.split('\n')[4].split()[2].split('/')[2]) < 39:
++    fail('unexpected renewed tgt expiration year')
++if int(out.split('\n')[5].split()[2].split('/')[2]) < 40:
++    fail('unexpected renewed tgt rtill year')
++
++success('y2038 tests')

@@ -1,0 +1,53 @@
+From 16c9dd3d2f8d74958495674f4906626a74ef8c12 Mon Sep 17 00:00:00 2001
+From: Robbie Harwood <rharwood@redhat.com>
+Date: Fri, 22 Apr 2016 10:03:07 -0400
+Subject: [PATCH] krb5-kvno-230379.patch
+
+---
+ src/kadmin/ktutil/ktutil.c    | 5 +++--
+ src/lib/krb5/keytab/kt_file.c | 2 +-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/src/kadmin/ktutil/ktutil.c b/src/kadmin/ktutil/ktutil.c
+index ef16d37a5..64a6d6ab1 100644
+--- a/src/kadmin/ktutil/ktutil.c
++++ b/src/kadmin/ktutil/ktutil.c
+@@ -140,7 +140,7 @@ void ktutil_add_entry(argc, argv)
+     char *princ = NULL;
+     char *enctype = NULL;
+     krb5_kvno kvno = 0;
+-    int use_pass = 0, use_key = 0, i;
++    int use_pass = 0, use_key = 0, use_kvno = 0, i;
+ 
+     for (i = 1; i < argc; i++) {
+         if ((strlen(argv[i]) == 2) && !strncmp(argv[i], "-p", 2)) {
+@@ -149,6 +149,7 @@ void ktutil_add_entry(argc, argv)
+         }
+         if ((strlen(argv[i]) == 2) && !strncmp(argv[i], "-k", 2)) {
+             kvno = (krb5_kvno) atoi(argv[++i]);
++            use_kvno++;
+             continue;
+         }
+         if ((strlen(argv[i]) == 2) && !strncmp(argv[i], "-e", 2)) {
+@@ -165,7 +166,7 @@ void ktutil_add_entry(argc, argv)
+         }
+     }
+ 
+-    if (argc != 8 || !(princ && kvno && enctype) || (use_pass+use_key != 1)) {
++    if (argc != 8 || !(princ && use_kvno && enctype) || (use_pass+use_key != 1)) {
+         fprintf(stderr, _("usage: %s (-key | -password) -p principal "
+                           "-k kvno -e enctype\n"), argv[0]);
+         return;
+diff --git a/src/lib/krb5/keytab/kt_file.c b/src/lib/krb5/keytab/kt_file.c
+index 674d88bab..131549ffe 100644
+--- a/src/lib/krb5/keytab/kt_file.c
++++ b/src/lib/krb5/keytab/kt_file.c
+@@ -377,7 +377,7 @@ krb5_ktfile_get_entry(krb5_context context, krb5_keytab id,
+              * Otherwise, remember that we were here so we can return the right
+              * error, and free the new.
+              */
+-            if (new_entry.vno == kvno) {
++            if (new_entry.vno == kvno || new_entry.vno == IGNORE_VNO) {
+                 krb5_kt_free_entry(context, &cur_entry);
+                 cur_entry = new_entry;
+                 if (new_entry.vno == kvno)

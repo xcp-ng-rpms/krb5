@@ -1,0 +1,73 @@
+From 9c0a06f38189d255575acdae5efb22b76b4c33b3 Mon Sep 17 00:00:00 2001
+From: Robbie Harwood <rharwood@redhat.com>
+Date: Mon, 13 Nov 2017 13:32:37 -0500
+Subject: [PATCH] Expose context errors in pkinit_server_plugin_init
+
+Commit 3ff426b9048a8024e5c175256c63cd0ad0572320 attempted to display
+an error when OCSP support was requested, but this error message was
+suppressed in pkinit_server_plugin_init().  Add a trace log for each
+realm initialization error, and pass through the realm initialization
+error when the KDC serves only one realm.  Other error messages from
+pkinit_init_kdc_profile(), such as missing pkinit_identity or
+pkinit_anchors, are also now exposted.
+
+[ghudson@mit.edu: clarified commit message]
+
+ticket: 8621 (new)
+target_version: 1.16
+tags: pullup
+
+(cherry picked from commit 225aab3540c13c6289b22022d5e110f6fc26151d)
+---
+ src/plugins/preauth/pkinit/pkinit_srv.c   | 19 +++++++++++++------
+ src/plugins/preauth/pkinit/pkinit_trace.h |  3 +++
+ 2 files changed, 16 insertions(+), 6 deletions(-)
+
+diff --git a/src/plugins/preauth/pkinit/pkinit_srv.c b/src/plugins/preauth/pkinit/pkinit_srv.c
+index 8e77606f8..143d331a2 100644
+--- a/src/plugins/preauth/pkinit/pkinit_srv.c
++++ b/src/plugins/preauth/pkinit/pkinit_srv.c
+@@ -1622,16 +1622,23 @@ pkinit_server_plugin_init(krb5_context context,
+ 
+     for (i = 0, j = 0; i < numrealms; i++) {
+         TRACE_PKINIT_SERVER_INIT_REALM(context, realmnames[i]);
+-        retval = pkinit_server_plugin_init_realm(context, realmnames[i], &plgctx);
+-        if (retval == 0 && plgctx != NULL)
++        krb5_clear_error_message(context);
++        retval = pkinit_server_plugin_init_realm(context, realmnames[i],
++                                                 &plgctx);
++        if (retval)
++            TRACE_PKINIT_SERVER_INIT_FAIL(context, realmnames[i], retval);
++        else
+             realm_contexts[j++] = plgctx;
+     }
+ 
+     if (j == 0) {
+-        retval = EINVAL;
+-        krb5_set_error_message(context, retval,
+-                               _("No realms configured correctly for pkinit "
+-                                 "support"));
++        if (numrealms == 1) {
++            k5_prependmsg(context, retval, "PKINIT initialization failed");
++        } else {
++            retval = EINVAL;
++            k5_setmsg(context, retval,
++                      _("No realms configured correctly for pkinit support"));
++        }
+         goto errout;
+     }
+ 
+diff --git a/src/plugins/preauth/pkinit/pkinit_trace.h b/src/plugins/preauth/pkinit/pkinit_trace.h
+index 6abe28c0c..8d489469f 100644
+--- a/src/plugins/preauth/pkinit/pkinit_trace.h
++++ b/src/plugins/preauth/pkinit/pkinit_trace.h
+@@ -100,6 +100,9 @@
+     TRACE(c, "PKINIT server skipping EKU check due to configuration")
+ #define TRACE_PKINIT_SERVER_INIT_REALM(c, realm)                \
+     TRACE(c, "PKINIT server initializing realm {str}", realm)
++#define TRACE_PKINIT_SERVER_INIT_FAIL(c, realm, retval)                 \
++    TRACE(c, "PKINIT server initialization failed for realm {str}: {kerr}", \
++          realm, retval)
+ #define TRACE_PKINIT_SERVER_MATCHING_UPN_FOUND(c)                       \
+     TRACE(c, "PKINIT server found a matching UPN SAN in client cert")
+ #define TRACE_PKINIT_SERVER_MATCHING_SAN_FOUND(c)                       \

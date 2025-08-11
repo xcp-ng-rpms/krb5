@@ -1,0 +1,11 @@
+[Unit]
+Description=Kerberos 5 Propagation
+After=syslog.target network.target
+
+[Service]
+Type=forking
+EnvironmentFile=-/etc/sysconfig/kprop
+ExecStart=/usr/sbin/_kpropd $KPROPD_ARGS
+
+[Install]
+WantedBy=multi-user.target
