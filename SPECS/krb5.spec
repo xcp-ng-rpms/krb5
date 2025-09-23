@@ -1,6 +1,6 @@
-%global package_speccommit 570b637c1e9ea36d0cb85021f2b60f0d9400ca61
+%global package_speccommit cc9fd54eb74c0e9d25a69bc45ecf7f6df1cd8de6
 %global usver 1.15.1
-%global xsver 21
+%global xsver 22
 %global xsrel %{xsver}%{?xscount}%{?xshash}
 
 %global WITH_DIRSRV 1
@@ -86,6 +86,7 @@ Patch36: Fix-certauth-built-in-module-returns.patch
 Patch37: Add-test-cert-with-no-extensions.patch
 Patch38: Expose-context-errors-in-pkinit_server_plugin_init.patch
 Patch39: Limit-ticket-lifetime-to-2-31-1-seconds.patch
+Patch40: Disable-_kerberos-master-SRV-query-for-AD.patch
 
 BuildRequires: cmake xz
 # Carry this locally until it's available in a packaged form.
@@ -738,6 +739,9 @@ exit 0
 %{_libdir}/libkadm5srv_mit.so.*
 
 %changelog
+* Wed Jul 16 2025 Deli Zhang <deli.zhang@cloud.com> 1.15.1-22
+- CA-413120: Disable _kerberos-master SRV query for AD
+
 * Tue Mar 25 2025 Lin Liu <Lin.Liu01@cloud.com> - 1.15.1-21
 - CA-408551: XSI-1834: Disable dns_uri_lookup by default
 
