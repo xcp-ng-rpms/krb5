@@ -1,3 +1,5 @@
+%bcond_with docs
+
 %global package_speccommit cc9fd54eb74c0e9d25a69bc45ecf7f6df1cd8de6
 %global usver 1.15.1
 %global xsver 22
@@ -17,7 +19,7 @@
 Summary: The Kerberos network authentication system
 Name: krb5
 Version: 1.15.1
-Release: %{?xsrel}%{?dist}
+Release: %{?xsrel}.0%{?dist}
 
 # - Maybe we should explode from the now-available-to-everybody tarball instead?
 # http://web.mit.edu/kerberos/dist/krb5/1.13/krb5-1.13.2-signed.tar
@@ -88,6 +90,8 @@ Patch38: Expose-context-errors-in-pkinit_server_plugin_init.patch
 Patch39: Limit-ticket-lifetime-to-2-31-1-seconds.patch
 Patch40: Disable-_kerberos-master-SRV-query-for-AD.patch
 
+BuildRequires: gcc
+
 BuildRequires: cmake xz
 # Carry this locally until it's available in a packaged form.
 Source100: nss_wrapper-0.0-20140204195100.git3d58327.tar.xz
@@ -101,6 +105,8 @@ BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires: autoconf, bison, flex, gawk, gettext, pkgconfig, sed
 BuildRequires: libcom_err-devel, libedit-devel, libss-devel
 BuildRequires: gzip, ncurses-devel
+
+%if %{with docs}
 BuildRequires: texlive-pdftex
 
 # Taken from \usepackage directives produced by sphinx:
@@ -124,6 +130,8 @@ BuildRequires: tex(report.cls)
 # Typical fonts, and the commands which we need to have present.
 BuildRequires: texlive, texlive-latex, texlive-texmf-fonts
 BuildRequires: /usr/bin/pdflatex /usr/bin/makeindex
+%endif
+
 BuildRequires: keyutils, keyutils-libs-devel >= 1.5.8
 BuildRequires: libselinux-devel
 BuildRequires: pam-devel
@@ -739,6 +747,11 @@ exit 0
 %{_libdir}/libkadm5srv_mit.so.*
 
 %changelog
+* Mon Jan 19 2026 Philippe Coval <philippe.coval@vates.tech> - 1.15.1-22.0
+- Add explicit dependency to gcc
+- Make build dependency to latex optionnal
+- Rebuild with openssl-3
+
 * Wed Jul 16 2025 Deli Zhang <deli.zhang@cloud.com> 1.15.1-22
 - CA-413120: Disable _kerberos-master SRV query for AD
 
