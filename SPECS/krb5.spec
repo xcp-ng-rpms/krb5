@@ -19,7 +19,7 @@
 Summary: The Kerberos network authentication system
 Name: krb5
 Version: 1.15.1
-Release: %{?xsrel}.0%{?dist}
+Release: %{?xsrel}.1%{?dist}
 
 # - Maybe we should explode from the now-available-to-everybody tarball instead?
 # http://web.mit.edu/kerberos/dist/krb5/1.13/krb5-1.13.2-signed.tar
@@ -89,6 +89,7 @@ Patch37: Add-test-cert-with-no-extensions.patch
 Patch38: Expose-context-errors-in-pkinit_server_plugin_init.patch
 Patch39: Limit-ticket-lifetime-to-2-31-1-seconds.patch
 Patch40: Disable-_kerberos-master-SRV-query-for-AD.patch
+Patch41: Skip-keyring-tests-if-keyring-blocked-by-seccomp.patch
 
 BuildRequires: gcc
 
@@ -747,7 +748,8 @@ exit 0
 %{_libdir}/libkadm5srv_mit.so.*
 
 %changelog
-* Mon Jan 19 2026 Philippe Coval <philippe.coval@vates.tech> - 1.15.1-22.0
+* Tue Feb 10 2026 Philippe Coval <philippe.coval@vates.tech> - 1.15.1-22.1
+- Skip keyring tests if keyring blocked by seccomp
 - Add explicit dependency to gcc
 - Make build dependency to latex optionnal
 - Rebuild with openssl-3
