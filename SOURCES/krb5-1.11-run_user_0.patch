@@ -1,0 +1,41 @@
+From b22fe94f6965ebdd2e0cbf2ac002e0e5f9c11789 Mon Sep 17 00:00:00 2001
+From: Robbie Harwood <rharwood@redhat.com>
+Date: Fri, 22 Apr 2016 10:03:22 -0400
+Subject: [PATCH] krb5-1.11-run_user_0.patch
+
+---
+ src/lib/krb5/ccache/cc_dir.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/lib/krb5/ccache/cc_dir.c b/src/lib/krb5/ccache/cc_dir.c
+index 73f0fe62d..4850c0d07 100644
+--- a/src/lib/krb5/ccache/cc_dir.c
++++ b/src/lib/krb5/ccache/cc_dir.c
+@@ -61,6 +61,8 @@
+ 
+ #include <dirent.h>
+ 
++#define ROOT_SPECIAL_DCC_PARENT "/run/user/0"
++
+ extern const krb5_cc_ops krb5_dcc_ops;
+ extern const krb5_cc_ops krb5_fcc_ops;
+ 
+@@ -237,6 +239,18 @@ verify_dir(krb5_context context, const char *dirname)
+ 
+     if (stat(dirname, &st) < 0) {
+         if (errno == ENOENT) {
++            if (strncmp(dirname, ROOT_SPECIAL_DCC_PARENT "/",
++                        sizeof(ROOT_SPECIAL_DCC_PARENT)) == 0 &&
++                stat(ROOT_SPECIAL_DCC_PARENT, &st) < 0 &&
++                errno == ENOENT) {
++#ifdef USE_SELINUX
++                selabel = krb5int_push_fscreatecon_for(ROOT_SPECIAL_DCC_PARENT);
++#endif
++                status = mkdir(ROOT_SPECIAL_DCC_PARENT, S_IRWXU);
++#ifdef USE_SELINUX
++                krb5int_pop_fscreatecon(selabel);
++#endif
++            }
+ #ifdef USE_SELINUX
+             selabel = krb5int_push_fscreatecon_for(dirname);
+ #endif

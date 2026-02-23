@@ -1,0 +1,21 @@
+From e48799ea02841461af9a97a8f490bcf4f4ac5666 Mon Sep 17 00:00:00 2001
+From: Robbie Harwood <rharwood@redhat.com>
+Date: Fri, 22 Apr 2016 09:59:05 -0400
+Subject: [PATCH] krb5-1.3.1-dns.patch
+
+---
+ src/aclocal.m4 | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/aclocal.m4 b/src/aclocal.m4
+index 607859f17..f5667c35f 100644
+--- a/src/aclocal.m4
++++ b/src/aclocal.m4
+@@ -703,6 +703,7 @@ AC_HELP_STRING([--with-netlib=LIBS], use user defined resolver library),
+ 	LIBS="$LIBS $withval"
+ 	AC_MSG_RESULT("netlib will use \'$withval\'")
+   fi
++  KRB5_AC_ENABLE_DNS
+ ],dnl
+ [AC_LIBRARY_NET]
+ )])dnl

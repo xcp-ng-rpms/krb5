@@ -1,0 +1,203 @@
+From 31d5c854198ed91fc2bd0b9fb87ed0dcd5a40eb6 Mon Sep 17 00:00:00 2001
+From: Greg Hudson <ghudson@mit.edu>
+Date: Thu, 24 Aug 2017 16:00:33 -0400
+Subject: [PATCH] Limit ticket lifetime to 2^31-1 seconds
+
+Although timestamps above 2^31-1 are now valid, intervals exceeding
+2^31-1 seconds may be treated incorrectly by comparison operations.
+
+The initially computed interval in kdc_get_ticket_endtime() could be
+negative if the requested end time is far in the future, causing the
+function to yield an incorrect result.  (With the new larger value of
+kdc_infinity, this could specifically happen if a KDC-REQ contains a
+zero till field.)  Cap the interval at the maximum valid value.
+Reported by Weijun Wang.
+
+Avoid delta comparisons in favor of timestamp comparions in
+krb5int_validate_times(), ksu's krb5_check_exp(), and clockskew
+checks.
+
+Also use a y2038-safe timestamp comparison in set_request_times() when
+comparing the requested renewable end time to the requested ticket end
+time.
+
+ticket: 8352
+(cherry picked from commit 54e58755368b58ba5894a14c1d02626da42d8003)
+---
+ src/clients/ksu/ccache.c       | 2 +-
+ src/include/k5-int.h           | 7 +++++++
+ src/kdc/kdc_util.c             | 7 ++++++-
+ src/kdc/replay.c               | 2 +-
+ src/kdc/t_replay.c             | 2 +-
+ src/lib/krb5/krb/gc_via_tkt.c  | 4 ++--
+ src/lib/krb5/krb/get_in_tkt.c  | 6 +++---
+ src/lib/krb5/krb/int-proto.h   | 3 ---
+ src/lib/krb5/krb/valid_times.c | 4 ++--
+ src/lib/krb5/os/timeofday.c    | 2 +-
+ 10 files changed, 24 insertions(+), 15 deletions(-)
+
+diff --git a/src/clients/ksu/ccache.c b/src/clients/ksu/ccache.c
+index 236313b7b..2a99521d4 100644
+--- a/src/clients/ksu/ccache.c
++++ b/src/clients/ksu/ccache.c
+@@ -282,7 +282,7 @@ krb5_error_code krb5_check_exp(context, tkt_time)
+ 
+     }
+ 
+-    if (ts_delta(currenttime, tkt_time.endtime) > context->clockskew) {
++    if (ts_after(currenttime, ts_incr(tkt_time.endtime, context->clockskew))) {
+         retval = KRB5KRB_AP_ERR_TKT_EXPIRED ;
+         return retval;
+     }
+diff --git a/src/include/k5-int.h b/src/include/k5-int.h
+index 39ffb9568..e31004a7c 100644
+--- a/src/include/k5-int.h
++++ b/src/include/k5-int.h
+@@ -2386,6 +2386,13 @@ ts_after(krb5_timestamp a, krb5_timestamp b)
+     return (uint32_t)a > (uint32_t)b;
+ }
+ 
++/* Return true if a and b are within d seconds. */
++static inline krb5_boolean
++ts_within(krb5_timestamp a, krb5_timestamp b, krb5_deltat d)
++{
++    return !ts_after(a, ts_incr(b, d)) && !ts_after(b, ts_incr(a, d));
++}
++
+ krb5_error_code KRB5_CALLCONV
+ krb5_get_credentials_for_user(krb5_context context, krb5_flags options,
+                               krb5_ccache ccache,
+diff --git a/src/kdc/kdc_util.c b/src/kdc/kdc_util.c
+index 5455e2a67..770163b94 100644
+--- a/src/kdc/kdc_util.c
++++ b/src/kdc/kdc_util.c
+@@ -1759,14 +1759,19 @@ kdc_get_ticket_endtime(kdc_realm_t *kdc_active_realm,
+                        krb5_db_entry *server,
+                        krb5_timestamp *out_endtime)
+ {
+-    krb5_timestamp until, life;
++    krb5_timestamp until;
++    krb5_deltat life;
+ 
+     if (till == 0)
+         till = kdc_infinity;
+ 
+     until = ts_min(till, endtime);
+ 
++    /* Determine the requested lifetime, capped at the maximum valid time
++     * interval. */
+     life = ts_delta(until, starttime);
++    if (ts_after(until, starttime) && life < 0)
++        life = INT32_MAX;
+ 
+     if (client != NULL && client->max_life != 0)
+         life = min(life, client->max_life);
+diff --git a/src/kdc/replay.c b/src/kdc/replay.c
+index fab39cf88..caca783bf 100644
+--- a/src/kdc/replay.c
++++ b/src/kdc/replay.c
+@@ -61,7 +61,7 @@ static size_t total_size = 0;
+ static krb5_ui_4 seed;
+ 
+ #define STALE_TIME      (2*60)            /* two minutes */
+-#define STALE(ptr, now) (labs(ts_delta((ptr)->timein, now)) >= STALE_TIME)
++#define STALE(ptr, now) (ts_after(now, ts_incr((ptr)->timein, STALE_TIME)))
+ 
+ /* Return x rotated to the left by r bits. */
+ static inline krb5_ui_4
+diff --git a/src/kdc/t_replay.c b/src/kdc/t_replay.c
+index 1442e0e8c..bb7e2faff 100644
+--- a/src/kdc/t_replay.c
++++ b/src/kdc/t_replay.c
+@@ -903,7 +903,7 @@ test_kdc_insert_lookaside_cache_expire(void **state)
+     assert_non_null(e);
+     e->num_hits = 5;
+ 
+-    time_return(STALE_TIME, 0);
++    time_return(STALE_TIME + 1, 0);
+     kdc_insert_lookaside(context, &req2, NULL);
+ 
+     assert_null(K5_LIST_FIRST(&hash_table[req_hash1]));
+diff --git a/src/lib/krb5/krb/gc_via_tkt.c b/src/lib/krb5/krb/gc_via_tkt.c
+index cf1ea361f..5b9bb9573 100644
+--- a/src/lib/krb5/krb/gc_via_tkt.c
++++ b/src/lib/krb5/krb/gc_via_tkt.c
+@@ -306,8 +306,8 @@ krb5int_process_tgs_reply(krb5_context context,
+         goto cleanup;
+ 
+     if (!in_cred->times.starttime &&
+-        !in_clock_skew(context, dec_rep->enc_part2->times.starttime,
+-                       timestamp)) {
++        !ts_within(dec_rep->enc_part2->times.starttime, timestamp,
++                   context->clockskew)) {
+         retval = KRB5_KDCREP_SKEW;
+         goto cleanup;
+     }
+diff --git a/src/lib/krb5/krb/get_in_tkt.c b/src/lib/krb5/krb/get_in_tkt.c
+index 7178bd87b..ed15550f0 100644
+--- a/src/lib/krb5/krb/get_in_tkt.c
++++ b/src/lib/krb5/krb/get_in_tkt.c
+@@ -269,8 +269,8 @@ verify_as_reply(krb5_context            context,
+             return retval;
+     } else {
+         if ((request->from == 0) &&
+-            !in_clock_skew(context, as_reply->enc_part2->times.starttime,
+-                           time_now))
++            !ts_within(as_reply->enc_part2->times.starttime, time_now,
++                       context->clockskew))
+             return (KRB5_KDCREP_SKEW);
+     }
+     return 0;
+@@ -781,7 +781,7 @@ set_request_times(krb5_context context, krb5_init_creds_context ctx)
+     if (ctx->renew_life > 0) {
+         /* Don't ask for a smaller renewable time than the lifetime. */
+         ctx->request->rtime = ts_incr(from, ctx->renew_life);
+-        if (ctx->request->rtime < ctx->request->till)
++        if (ts_after(ctx->request->till, ctx->request->rtime))
+             ctx->request->rtime = ctx->request->till;
+         ctx->request->kdc_options &= ~KDC_OPT_RENEWABLE_OK;
+     } else {
+diff --git a/src/lib/krb5/krb/int-proto.h b/src/lib/krb5/krb/int-proto.h
+index 48bd9f8f7..9c746d05b 100644
+--- a/src/lib/krb5/krb/int-proto.h
++++ b/src/lib/krb5/krb/int-proto.h
+@@ -83,9 +83,6 @@ krb5int_construct_matching_creds(krb5_context context, krb5_flags options,
+                                  krb5_creds *in_creds, krb5_creds *mcreds,
+                                  krb5_flags *fields);
+ 
+-#define in_clock_skew(context, date, now)               \
+-    (labs(ts_delta(date, now)) < (context)->clockskew)
+-
+ #define IS_TGS_PRINC(p) ((p)->length == 2 &&                            \
+                          data_eq_string((p)->data[0], KRB5_TGS_NAME))
+ 
+diff --git a/src/lib/krb5/krb/valid_times.c b/src/lib/krb5/krb/valid_times.c
+index 9e509b2dd..294761a88 100644
+--- a/src/lib/krb5/krb/valid_times.c
++++ b/src/lib/krb5/krb/valid_times.c
+@@ -47,10 +47,10 @@ krb5int_validate_times(krb5_context context, krb5_ticket_times *times)
+     else
+         starttime = times->authtime;
+ 
+-    if (ts_delta(starttime, currenttime) > context->clockskew)
++    if (ts_after(starttime, ts_incr(currenttime, context->clockskew)))
+         return KRB5KRB_AP_ERR_TKT_NYV;  /* ticket not yet valid */
+ 
+-    if (ts_delta(currenttime, times->endtime) > context->clockskew)
++    if (ts_after(currenttime, ts_incr(times->endtime, context->clockskew)))
+         return KRB5KRB_AP_ERR_TKT_EXPIRED; /* ticket expired */
+ 
+     return 0;
+diff --git a/src/lib/krb5/os/timeofday.c b/src/lib/krb5/os/timeofday.c
+index 887f24c22..d4e36b1c7 100644
+--- a/src/lib/krb5/os/timeofday.c
++++ b/src/lib/krb5/os/timeofday.c
+@@ -60,7 +60,7 @@ krb5_check_clockskew(krb5_context context, krb5_timestamp date)
+     retval = krb5_timeofday(context, &currenttime);
+     if (retval)
+         return retval;
+-    if (labs(ts_delta(date, currenttime)) >= context->clockskew)
++    if (!ts_within(date, currenttime, context->clockskew))
+         return KRB5KRB_AP_ERR_SKEW;
+ 
+     return 0;

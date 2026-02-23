@@ -1,0 +1,134 @@
+From 9ff3ed399f9a5bb0c6101a986798d80ecc7a1b92 Mon Sep 17 00:00:00 2001
+From: Robbie Harwood <rharwood@redhat.com>
+Date: Mon, 31 Jul 2017 16:03:41 -0400
+Subject: [PATCH] Remove incomplete PKINIT OCSP support
+
+pkinit_kdc_ocsp is non-functional in the PKINIT OpenSSL crypto
+implementation, so remove most traces of it, including its man page
+entry.  If it is present in kdc.conf, error out of PKINIT
+initialization instead of silently ignoring the realm entirely.
+
+ticket: 8603 (new)
+(cherry picked from commit 3ff426b9048a8024e5c175256c63cd0ad0572320)
+---
+ doc/admin/conf_files/kdc_conf.rst            |  3 ---
+ src/man/kdc.conf.man                         |  3 ---
+ src/plugins/preauth/pkinit/pkinit.h          |  2 +-
+ src/plugins/preauth/pkinit/pkinit_identity.c | 11 -----------
+ src/plugins/preauth/pkinit/pkinit_srv.c      | 12 ++++++++++--
+ 5 files changed, 11 insertions(+), 20 deletions(-)
+
+diff --git a/doc/admin/conf_files/kdc_conf.rst b/doc/admin/conf_files/kdc_conf.rst
+index 13077ecf4..a4b2a5432 100644
+--- a/doc/admin/conf_files/kdc_conf.rst
++++ b/doc/admin/conf_files/kdc_conf.rst
+@@ -765,9 +765,6 @@ For information about the syntax of some of these options, see
+     pkinit is used to authenticate.  This option may be specified
+     multiple times.  (New in release 1.14.)
+ 
+-**pkinit_kdc_ocsp**
+-    Specifies the location of the KDC's OCSP.
+-
+ **pkinit_pool**
+     Specifies the location of intermediate certificates which may be
+     used by the KDC to complete the trust chain between a client's
+diff --git a/src/man/kdc.conf.man b/src/man/kdc.conf.man
+index 10b333c38..166e68f9a 100644
+--- a/src/man/kdc.conf.man
++++ b/src/man/kdc.conf.man
+@@ -886,9 +886,6 @@ Specifies an authentication indicator to include in the ticket if
+ pkinit is used to authenticate.  This option may be specified
+ multiple times.  (New in release 1.14.)
+ .TP
+-.B \fBpkinit_kdc_ocsp\fP
+-Specifies the location of the KDC\(aqs OCSP.
+-.TP
+ .B \fBpkinit_pool\fP
+ Specifies the location of intermediate certificates which may be
+ used by the KDC to complete the trust chain between a client\(aqs
+diff --git a/src/plugins/preauth/pkinit/pkinit.h b/src/plugins/preauth/pkinit/pkinit.h
+index 876db94c3..a49f3078e 100644
+--- a/src/plugins/preauth/pkinit/pkinit.h
++++ b/src/plugins/preauth/pkinit/pkinit.h
+@@ -73,6 +73,7 @@
+ #define KRB5_CONF_PKINIT_IDENTITIES             "pkinit_identities"
+ #define KRB5_CONF_PKINIT_IDENTITY               "pkinit_identity"
+ #define KRB5_CONF_PKINIT_KDC_HOSTNAME           "pkinit_kdc_hostname"
++/* pkinit_kdc_ocsp has been removed */
+ #define KRB5_CONF_PKINIT_KDC_OCSP               "pkinit_kdc_ocsp"
+ #define KRB5_CONF_PKINIT_POOL                   "pkinit_pool"
+ #define KRB5_CONF_PKINIT_REQUIRE_CRL_CHECKING   "pkinit_require_crl_checking"
+@@ -173,7 +174,6 @@ typedef struct _pkinit_identity_opts {
+     char **anchors;
+     char **intermediates;
+     char **crls;
+-    char *ocsp;
+     int  idtype;
+     char *cert_filename;
+     char *key_filename;
+diff --git a/src/plugins/preauth/pkinit/pkinit_identity.c b/src/plugins/preauth/pkinit/pkinit_identity.c
+index 177a2cad8..a897efa25 100644
+--- a/src/plugins/preauth/pkinit/pkinit_identity.c
++++ b/src/plugins/preauth/pkinit/pkinit_identity.c
+@@ -125,7 +125,6 @@ pkinit_init_identity_opts(pkinit_identity_opts **idopts)
+     opts->anchors = NULL;
+     opts->intermediates = NULL;
+     opts->crls = NULL;
+-    opts->ocsp = NULL;
+ 
+     opts->cert_filename = NULL;
+     opts->key_filename = NULL;
+@@ -174,12 +173,6 @@ pkinit_dup_identity_opts(pkinit_identity_opts *src_opts,
+     if (retval)
+         goto cleanup;
+ 
+-    if (src_opts->ocsp != NULL) {
+-        newopts->ocsp = strdup(src_opts->ocsp);
+-        if (newopts->ocsp == NULL)
+-            goto cleanup;
+-    }
+-
+     if (src_opts->cert_filename != NULL) {
+         newopts->cert_filename = strdup(src_opts->cert_filename);
+         if (newopts->cert_filename == NULL)
+@@ -674,10 +667,6 @@ pkinit_identity_prompt(krb5_context context,
+         if (retval)
+             goto errout;
+     }
+-    if (idopts->ocsp != NULL) {
+-        retval = ENOTSUP;
+-        goto errout;
+-    }
+ 
+ errout:
+     return retval;
+diff --git a/src/plugins/preauth/pkinit/pkinit_srv.c b/src/plugins/preauth/pkinit/pkinit_srv.c
+index 731d14eb8..32ca122f2 100644
+--- a/src/plugins/preauth/pkinit/pkinit_srv.c
++++ b/src/plugins/preauth/pkinit/pkinit_srv.c
+@@ -1252,7 +1252,7 @@ static krb5_error_code
+ pkinit_init_kdc_profile(krb5_context context, pkinit_kdc_context plgctx)
+ {
+     krb5_error_code retval;
+-    char *eku_string = NULL;
++    char *eku_string = NULL, *ocsp_check = NULL;
+ 
+     pkiDebug("%s: entered for realm %s\n", __FUNCTION__, plgctx->realmname);
+     retval = pkinit_kdcdefault_string(context, plgctx->realmname,
+@@ -1287,7 +1287,15 @@ pkinit_init_kdc_profile(krb5_context context, pkinit_kdc_context plgctx)
+ 
+     pkinit_kdcdefault_string(context, plgctx->realmname,
+                              KRB5_CONF_PKINIT_KDC_OCSP,
+-                             &plgctx->idopts->ocsp);
++                             &ocsp_check);
++    if (ocsp_check != NULL) {
++        free(ocsp_check);
++        retval = ENOTSUP;
++        krb5_set_error_message(context, retval,
++                               _("OCSP is not supported: (realm: %s)"),
++                               plgctx->realmname);
++        goto errout;
++    }
+ 
+     pkinit_kdcdefault_integer(context, plgctx->realmname,
+                               KRB5_CONF_PKINIT_DH_MIN_BITS,

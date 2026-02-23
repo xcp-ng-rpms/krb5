@@ -1,0 +1,994 @@
+From f12b57979012f93b339982ba335093d7c0d364f7 Mon Sep 17 00:00:00 2001
+From: Robbie Harwood <rharwood@redhat.com>
+Date: Tue, 27 Jun 2017 17:15:39 -0400
+Subject: [PATCH] Add KDC policy pluggable interface
+
+Add the header include/krb5/kdcpolicy_plugin.h, defining a pluggable
+interface for modules to deny AS and TGS requests and set maximum
+ticket lifetimes.  This interface replaces the policy.c stub functions.
+
+Add check_kdcpolicy_as() and check_kdcpolicy_tgs() as entry functions.
+Call them after auth indicators and ticket lifetimes have been
+determined.
+
+Add a test module and a test script with basic kdcpolicy tests.  Add
+plugin interface documentation in doc/plugindev/policy.rst.
+
+Also authored by Matt Rogers <mrogers@redhat.com>.
+
+ticket: 8606 (new)
+(cherry picked from commit d0969f6a8170344031ef58fd2a161190f1edfb96)
+[rharwood@redhat.com: mention but do not use kadm_auth]
+---
+ doc/plugindev/index.rst                        |   1 +
+ doc/plugindev/kdcpolicy.rst                    |  24 +++
+ src/Makefile.in                                |   1 +
+ src/configure.in                               |   1 +
+ src/include/Makefile.in                        |   1 +
+ src/include/k5-int.h                           |   4 +-
+ src/include/k5-trace.h                         |   5 +
+ src/include/krb5/kdcpolicy_plugin.h            | 128 ++++++++++++
+ src/kdc/do_as_req.c                            |   7 +
+ src/kdc/do_tgs_req.c                           |   6 +
+ src/kdc/kdc_util.c                             |   7 -
+ src/kdc/kdc_util.h                             |  11 -
+ src/kdc/main.c                                 |   8 +
+ src/kdc/policy.c                               | 267 +++++++++++++++++++++----
+ src/kdc/policy.h                               |  19 +-
+ src/kdc/tgs_policy.c                           |   6 -
+ src/lib/krb5/krb/plugin.c                      |   4 +-
+ src/plugins/kdcpolicy/test/Makefile.in         |  20 ++
+ src/plugins/kdcpolicy/test/deps                |   0
+ src/plugins/kdcpolicy/test/main.c              | 111 ++++++++++
+ src/plugins/kdcpolicy/test/policy_test.exports |   1 +
+ src/tests/Makefile.in                          |   1 +
+ src/tests/t_kdcpolicy.py                       |  57 ++++++
+ 23 files changed, 616 insertions(+), 74 deletions(-)
+ create mode 100644 doc/plugindev/kdcpolicy.rst
+ create mode 100644 src/include/krb5/kdcpolicy_plugin.h
+ create mode 100644 src/plugins/kdcpolicy/test/Makefile.in
+ create mode 100644 src/plugins/kdcpolicy/test/deps
+ create mode 100644 src/plugins/kdcpolicy/test/main.c
+ create mode 100644 src/plugins/kdcpolicy/test/policy_test.exports
+ create mode 100644 src/tests/t_kdcpolicy.py
+
+diff --git a/doc/plugindev/index.rst b/doc/plugindev/index.rst
+index 67dbc2790..0a012b82b 100644
+--- a/doc/plugindev/index.rst
++++ b/doc/plugindev/index.rst
+@@ -32,5 +32,6 @@ Contents
+    gssapi.rst
+    internal.rst
+    certauth.rst
++   kdcpolicy.rst
+ 
+ .. TODO: GSSAPI mechanism plugins
+diff --git a/doc/plugindev/kdcpolicy.rst b/doc/plugindev/kdcpolicy.rst
+new file mode 100644
+index 000000000..74f21f08f
+--- /dev/null
++++ b/doc/plugindev/kdcpolicy.rst
+@@ -0,0 +1,24 @@
++.. _kdcpolicy_plugin:
++
++KDC policy interface (kdcpolicy)
++================================
++
++The kdcpolicy interface was first introduced in release 1.16.  It
++allows modules to veto otherwise valid AS and TGS requests or restrict
++the lifetime and renew time of the resulting ticket.  For a detailed
++description of the kdcpolicy interface, see the header file
++``<krb5/kdcpolicy_plugin.h>``.
++
++The optional **check_as** and **check_tgs** functions allow the module
++to perform access control.  Additionally, a module can create and
++destroy module data with the **init** and **fini** methods.  Module
++data objects last for the lifetime of the KDC process, and are
++provided to all other methods.  The data has the type
++krb5_kdcpolicy_moddata, which should be cast to the appropriate
++internal type.
++
++kdcpolicy modules can optionally inspect principal entries.  To do
++this, the module must also include ``<kdb.h>`` to gain access to the
++principal entry structure definition.  As the KDB interface is
++explicitly not as stable as other public interfaces, modules which do
++this may not retain compatibility across releases.
+diff --git a/src/Makefile.in b/src/Makefile.in
+index ad8565056..e47bddcb1 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -21,6 +21,7 @@ SUBDIRS=util include lib \
+ 	plugins/kdb/db2 \
+ 	@ldap_plugin_dir@ \
+ 	plugins/kdb/test \
++	plugins/kdcpolicy/test \
+ 	plugins/preauth/otp \
+ 	plugins/preauth/pkinit \
+ 	plugins/preauth/test \
+diff --git a/src/configure.in b/src/configure.in
+index 4ae2c07d5..ee1983043 100644
+--- a/src/configure.in
++++ b/src/configure.in
+@@ -1470,6 +1470,7 @@ dnl	ccapi ccapi/lib ccapi/lib/unix ccapi/server ccapi/server/unix ccapi/test
+ 	plugins/kdb/db2/libdb2/recno
+ 	plugins/kdb/db2/libdb2/test
+ 	plugins/kdb/test
++	plugins/kdcpolicy/test
+ 	plugins/preauth/otp
+ 	plugins/preauth/test
+ 	plugins/authdata/greet_client
+diff --git a/src/include/Makefile.in b/src/include/Makefile.in
+index 0239338a1..6a3fa8242 100644
+--- a/src/include/Makefile.in
++++ b/src/include/Makefile.in
+@@ -144,6 +144,7 @@ install-headers-unix install: krb5/krb5.h profile.h
+ 	$(INSTALL_DATA) $(srcdir)/krb5/ccselect_plugin.h $(DESTDIR)$(KRB5_INCDIR)$(S)krb5$(S)ccselect_plugin.h
+ 	$(INSTALL_DATA) $(srcdir)/krb5/clpreauth_plugin.h $(DESTDIR)$(KRB5_INCDIR)$(S)krb5$(S)clpreauth_plugin.h
+ 	$(INSTALL_DATA) $(srcdir)/krb5/hostrealm_plugin.h $(DESTDIR)$(KRB5_INCDIR)$(S)krb5$(S)hostrealm_plugin.h
++	$(INSTALL_DATA) $(srcdir)/krb5/kdcpolicy_plugin.h $(DESTDIR)$(KRB5_INCDIR)$(S)krb5$(S)kdcpolicy_plugin.h
+ 	$(INSTALL_DATA) $(srcdir)/krb5/kdcpreauth_plugin.h $(DESTDIR)$(KRB5_INCDIR)$(S)krb5$(S)kdcpreauth_plugin.h
+ 	$(INSTALL_DATA) $(srcdir)/krb5/localauth_plugin.h $(DESTDIR)$(KRB5_INCDIR)$(S)krb5$(S)localauth_plugin.h
+ 	$(INSTALL_DATA) $(srcdir)/krb5/locate_plugin.h $(DESTDIR)$(KRB5_INCDIR)$(S)krb5$(S)locate_plugin.h
+diff --git a/src/include/k5-int.h b/src/include/k5-int.h
+index ed9c7bf75..39ffb9568 100644
+--- a/src/include/k5-int.h
++++ b/src/include/k5-int.h
+@@ -1157,7 +1157,9 @@ struct plugin_interface {
+ #define PLUGIN_INTERFACE_TLS         8
+ #define PLUGIN_INTERFACE_KDCAUTHDATA 9
+ #define PLUGIN_INTERFACE_CERTAUTH    10
+-#define PLUGIN_NUM_INTERFACES        11
++#define PLUGIN_INTERFACE_KADM5_AUTH  11
++#define PLUGIN_INTERFACE_KDCPOLICY   12
++#define PLUGIN_NUM_INTERFACES        13
+ 
+ /* Retrieve the plugin module of type interface_id and name modname,
+  * storing the result into module. */
+diff --git a/src/include/k5-trace.h b/src/include/k5-trace.h
+index c75e264e0..2885408a2 100644
+--- a/src/include/k5-trace.h
++++ b/src/include/k5-trace.h
+@@ -454,4 +454,9 @@ void krb5int_trace(krb5_context context, const char *fmt, ...);
+ #define TRACE_GET_CRED_VIA_TKT_EXT_RETURN(c, ret) \
+     TRACE(c, "Got cred; {kerr}", ret)
+ 
++#define TRACE_KDCPOLICY_VTINIT_FAIL(c, ret)                             \
++    TRACE(c, "KDC policy module failed to init vtable: {kerr}", ret)
++#define TRACE_KDCPOLICY_INIT_SKIP(c, name)                              \
++    TRACE(c, "kadm5_auth module {str} declined to initialize", name)
++
+ #endif /* K5_TRACE_H */
+diff --git a/src/include/krb5/kdcpolicy_plugin.h b/src/include/krb5/kdcpolicy_plugin.h
+new file mode 100644
+index 000000000..c7592c5db
+--- /dev/null
++++ b/src/include/krb5/kdcpolicy_plugin.h
+@@ -0,0 +1,128 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* include/krb5/kdcpolicy_plugin.h - KDC policy plugin interface */
++/*
++ * Copyright (C) 2017 by Red Hat, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/*
++ * Declarations for kdcpolicy plugin module implementors.
++ *
++ * The kdcpolicy pluggable interface currently has only one supported major
++ * version, which is 1.  Major version 1 has a current minor version number of
++ * 1.
++ *
++ * kdcpolicy plugin modules should define a function named
++ * kdcpolicy_<modulename>_initvt, matching the signature:
++ *
++ *   krb5_error_code
++ *   kdcpolicy_modname_initvt(krb5_context context, int maj_ver, int min_ver,
++ *                            krb5_plugin_vtable vtable);
++ *
++ * The initvt function should:
++ *
++ * - Check that the supplied maj_ver number is supported by the module, or
++ *   return KRB5_PLUGIN_VER_NOTSUPP if it is not.
++ *
++ * - Cast the vtable pointer as appropriate for maj_ver:
++ *   maj_ver == 1: Cast to krb5_kdcpolicy_vtable
++ *
++ * - Initialize the methods of the vtable, stopping as appropriate for the
++ *   supplied min_ver.  Optional methods may be left uninitialized.
++ *
++ * Memory for the vtable is allocated by the caller, not by the module.
++ */
++
++#ifndef KRB5_POLICY_PLUGIN_H
++#define KRB5_POLICY_PLUGIN_H
++
++#include <krb5/krb5.h>
++
++/* Abstract module datatype. */
++typedef struct krb5_kdcpolicy_moddata_st *krb5_kdcpolicy_moddata;
++
++/* A module can optionally include kdb.h to inspect principal entries when
++ * authorizing requests. */
++struct _krb5_db_entry_new;
++
++/*
++ * Optional: Initialize module data.  Return 0 on success,
++ * KRB5_PLUGIN_NO_HANDLE if the module is inoperable (due to configuration, for
++ * example), and any other error code to abort KDC startup.  Optionally set
++ * *data_out to a module data object to be passed to future calls.
++ */
++typedef krb5_error_code
++(*krb5_kdcpolicy_init_fn)(krb5_context context,
++                          krb5_kdcpolicy_moddata *data_out);
++
++/* Optional: Clean up module data. */
++typedef krb5_error_code
++(*krb5_kdcpolicy_fini_fn)(krb5_context context,
++                          krb5_kdcpolicy_moddata moddata);
++
++/*
++ * Optional: return an error code and set status to an appropriate string
++ * literal to deny an AS request; otherwise return 0.  lifetime_out, if set,
++ * restricts the ticket lifetime.  renew_lifetime_out, if set, restricts the
++ * ticket renewable lifetime.
++ */
++typedef krb5_error_code
++(*krb5_kdcpolicy_check_as_fn)(krb5_context context,
++                              krb5_kdcpolicy_moddata moddata,
++                              const krb5_kdc_req *request,
++                              const struct _krb5_db_entry_new *client,
++                              const struct _krb5_db_entry_new *server,
++                              const char *const *auth_indicators,
++                              const char **status, krb5_deltat *lifetime_out,
++                              krb5_deltat *renew_lifetime_out);
++
++/*
++ * Optional: return an error code and set status to an appropriate string
++ * literal to deny a TGS request; otherwise return 0.  lifetime_out, if set,
++ * restricts the ticket lifetime.  renew_lifetime_out, if set, restricts the
++ * ticket renewable lifetime.
++ */
++typedef krb5_error_code
++(*krb5_kdcpolicy_check_tgs_fn)(krb5_context context,
++                               krb5_kdcpolicy_moddata moddata,
++                               const krb5_kdc_req *request,
++                               const struct _krb5_db_entry_new *server,
++                               const krb5_ticket *ticket,
++                               const char *const *auth_indicators,
++                               const char **status, krb5_deltat *lifetime_out,
++                               krb5_deltat *renew_lifetime_out);
++
++typedef struct krb5_kdcpolicy_vtable_st {
++    const char *name;
++    krb5_kdcpolicy_init_fn init;
++    krb5_kdcpolicy_fini_fn fini;
++    krb5_kdcpolicy_check_as_fn check_as;
++    krb5_kdcpolicy_check_tgs_fn check_tgs;
++} *krb5_kdcpolicy_vtable;
++
++#endif /* KRB5_POLICY_PLUGIN_H */
+diff --git a/src/kdc/do_as_req.c b/src/kdc/do_as_req.c
+index 59a39cd30..241b05b40 100644
+--- a/src/kdc/do_as_req.c
++++ b/src/kdc/do_as_req.c
+@@ -207,6 +207,13 @@ finish_process_as_req(struct as_req_state *state, krb5_error_code errcode)
+ 
+     state->ticket_reply.enc_part2 = &state->enc_tkt_reply;
+ 
++    errcode = check_kdcpolicy_as(kdc_context, state->request, state->client,
++                                 state->server, state->auth_indicators,
++                                 state->kdc_time, &state->enc_tkt_reply.times,
++                                 &state->status);
++    if (errcode)
++        goto egress;
++
+     /*
+      * Find the server key
+      */
+diff --git a/src/kdc/do_tgs_req.c b/src/kdc/do_tgs_req.c
+index aacd2f20d..4c722a4a3 100644
+--- a/src/kdc/do_tgs_req.c
++++ b/src/kdc/do_tgs_req.c
+@@ -518,6 +518,12 @@ process_tgs_req(struct server_handle *handle, krb5_data *pkt,
+     kdc_get_ticket_renewtime(kdc_active_realm, request, header_enc_tkt, client,
+                              server, &enc_tkt_reply);
+ 
++    errcode = check_kdcpolicy_tgs(kdc_context, request, server, header_ticket,
++                                  auth_indicators, kdc_time,
++                                  &enc_tkt_reply.times, &status);
++    if (errcode)
++        goto cleanup;
++
+     /*
+      * Set authtime to be the same as header or evidence ticket's
+      */
+diff --git a/src/kdc/kdc_util.c b/src/kdc/kdc_util.c
+index 778a629e5..8cbdf2c5b 100644
+--- a/src/kdc/kdc_util.c
++++ b/src/kdc/kdc_util.c
+@@ -642,7 +642,6 @@ validate_as_request(kdc_realm_t *kdc_active_realm,
+                     krb5_db_entry server, krb5_timestamp kdc_time,
+                     const char **status, krb5_pa_data ***e_data)
+ {
+-    int errcode;
+     krb5_error_code ret;
+ 
+     /*
+@@ -750,12 +749,6 @@ validate_as_request(kdc_realm_t *kdc_active_realm,
+     if (ret && ret != KRB5_PLUGIN_OP_NOTSUPP)
+         return errcode_to_protocol(ret);
+ 
+-    /* Check against local policy. */
+-    errcode = against_local_policy_as(request, client, server,
+-                                      kdc_time, status, e_data);
+-    if (errcode)
+-        return errcode;
+-
+     return 0;
+ }
+ 
+diff --git a/src/kdc/kdc_util.h b/src/kdc/kdc_util.h
+index 672f94380..dcedfd538 100644
+--- a/src/kdc/kdc_util.h
++++ b/src/kdc/kdc_util.h
+@@ -166,17 +166,6 @@ kdc_err(krb5_context call_context, errcode_t code, const char *fmt, ...)
+ #endif
+     ;
+ 
+-/* policy.c */
+-int
+-against_local_policy_as (krb5_kdc_req *, krb5_db_entry,
+-                         krb5_db_entry, krb5_timestamp,
+-                         const char **, krb5_pa_data ***);
+-
+-int
+-against_local_policy_tgs (krb5_kdc_req *, krb5_db_entry,
+-                          krb5_ticket *, const char **,
+-                          krb5_pa_data ***);
+-
+ /* kdc_preauth.c */
+ krb5_boolean
+ enctype_requires_etype_info_2(krb5_enctype enctype);
+diff --git a/src/kdc/main.c b/src/kdc/main.c
+index a4dffb29a..ccac3a759 100644
+--- a/src/kdc/main.c
++++ b/src/kdc/main.c
+@@ -31,6 +31,7 @@
+ #include "kdc_util.h"
+ #include "kdc_audit.h"
+ #include "extern.h"
++#include "policy.h"
+ #include "kdc5_err.h"
+ #include "kdb_kt.h"
+ #include "net-server.h"
+@@ -986,6 +987,12 @@ int main(int argc, char **argv)
+ 
+     load_preauth_plugins(&shandle, kcontext, ctx);
+     load_authdata_plugins(kcontext);
++    retval = load_kdcpolicy_plugins(kcontext);
++    if (retval) {
++        kdc_err(kcontext, retval, _("while loading KDC policy plugin"));
++        finish_realms();
++        return 1;
++    }
+ 
+     retval = setup_sam();
+     if (retval) {
+@@ -1068,6 +1075,7 @@ int main(int argc, char **argv)
+     krb5_klog_syslog(LOG_INFO, _("shutting down"));
+     unload_preauth_plugins(kcontext);
+     unload_authdata_plugins(kcontext);
++    unload_kdcpolicy_plugins(kcontext);
+     unload_audit_modules(kcontext);
+     krb5_klog_close(kcontext);
+     finish_realms();
+diff --git a/src/kdc/policy.c b/src/kdc/policy.c
+index 6cba4303f..e49644e06 100644
+--- a/src/kdc/policy.c
++++ b/src/kdc/policy.c
+@@ -1,67 +1,246 @@
+ /* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+ /* kdc/policy.c - Policy decision routines for KDC */
+ /*
+- * Copyright 1990 by the Massachusetts Institute of Technology.
++ * Copyright (C) 2017 by Red Hat, Inc.
++ * All rights reserved.
+  *
+- * Export of this software from the United States of America may
+- *   require a specific license from the United States Government.
+- *   It is the responsibility of any person or organization contemplating
+- *   export to obtain such a license before exporting.
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
+  *
+- * WITHIN THAT CONSTRAINT, permission to use, copy, modify, and
+- * distribute this software and its documentation for any purpose and
+- * without fee is hereby granted, provided that the above copyright
+- * notice appear in all copies and that both that copyright notice and
+- * this permission notice appear in supporting documentation, and that
+- * the name of M.I.T. not be used in advertising or publicity pertaining
+- * to distribution of the software without specific, written prior
+- * permission.  Furthermore if you modify this software you must label
+- * your software as modified software and not distribute it in such a
+- * fashion that it might be confused with the original M.I.T. software.
+- * M.I.T. makes no representations about the suitability of
+- * this software for any purpose.  It is provided "as is" without express
+- * or implied warranty.
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+ #include "k5-int.h"
+ #include "kdc_util.h"
+ #include "extern.h"
++#include "policy.h"
++#include "adm_proto.h"
++#include <krb5/kdcpolicy_plugin.h>
++#include <syslog.h>
+ 
+-int
+-against_local_policy_as(register krb5_kdc_req *request, krb5_db_entry client,
+-                        krb5_db_entry server, krb5_timestamp kdc_time,
+-                        const char **status, krb5_pa_data ***e_data)
++typedef struct kdcpolicy_handle_st {
++    struct krb5_kdcpolicy_vtable_st vt;
++    krb5_kdcpolicy_moddata moddata;
++} *kdcpolicy_handle;
++
++static kdcpolicy_handle *handles;
++
++static void
++free_indicators(char **ais)
+ {
+-#if 0
+-    /* An AS request must include the addresses field */
+-    if (request->addresses == 0) {
+-        *status = "NO ADDRESS";
+-        return KRB5KDC_ERR_POLICY;
+-    }
+-#endif
++    size_t i;
+ 
+-    return 0;                   /* not against policy */
++    if (ais == NULL)
++        return;
++    for (i = 0; ais[i] != NULL; i++)
++        free(ais[i]);
++    free(ais);
++}
++
++/* Convert inds to a null-terminated list of C strings. */
++static krb5_error_code
++authind_strings(krb5_data *const *inds, char ***strs_out)
++{
++    krb5_error_code ret;
++    char **list = NULL;
++    size_t i, count;
++
++    *strs_out = NULL;
++
++    for (count = 0; inds != NULL && inds[count] != NULL; count++);
++    list = k5calloc(count + 1, sizeof(*list), &ret);
++    if (list == NULL)
++        goto error;
++
++    for (i = 0; i < count; i++) {
++        list[i] = k5memdup0(inds[i]->data, inds[i]->length, &ret);
++        if (list[i] == NULL)
++            goto error;
++    }
++
++    *strs_out = list;
++    return 0;
++
++error:
++    free_indicators(list);
++    return ret;
++}
++
++/* Constrain times->endtime to life and times->renew_till to rlife, relative to
++ * now. */
++static void
++update_ticket_times(krb5_ticket_times *times, krb5_timestamp now,
++                    krb5_deltat life, krb5_deltat rlife)
++{
++    if (life)
++        times->endtime = ts_min(ts_incr(now, life), times->endtime);
++    if (rlife)
++        times->renew_till = ts_min(ts_incr(now, rlife), times->renew_till);
++}
++
++/* Check an AS request against kdcpolicy modules, updating times with any
++ * module endtime constraints.  Set an appropriate status string on error. */
++krb5_error_code
++check_kdcpolicy_as(krb5_context context, const krb5_kdc_req *request,
++                   const krb5_db_entry *client, const krb5_db_entry *server,
++                   krb5_data *const *auth_indicators, krb5_timestamp kdc_time,
++                   krb5_ticket_times *times, const char **status)
++{
++    krb5_deltat life, rlife;
++    krb5_error_code ret;
++    kdcpolicy_handle *hp, h;
++    char **ais = NULL;
++
++    *status = NULL;
++
++    ret = authind_strings(auth_indicators, &ais);
++    if (ret)
++        goto done;
++
++    for (hp = handles; *hp != NULL; hp++) {
++        h = *hp;
++        if (h->vt.check_as == NULL)
++            continue;
++
++        ret = h->vt.check_as(context, h->moddata, request, client, server,
++                             (const char **)ais, status, &life, &rlife);
++        if (ret)
++            goto done;
++
++        update_ticket_times(times, kdc_time, life, rlife);
++    }
++
++done:
++    free_indicators(ais);
++    return ret;
+ }
+ 
+ /*
+- * This is where local policy restrictions for the TGS should placed.
++ * Check the TGS request against the local TGS policy.  Accepts an
++ * authentication indicator for the module policy decisions.  Returns 0 and a
++ * NULL status string on success.
+  */
+ krb5_error_code
+-against_local_policy_tgs(register krb5_kdc_req *request, krb5_db_entry server,
+-                         krb5_ticket *ticket, const char **status,
+-                         krb5_pa_data ***e_data)
++check_kdcpolicy_tgs(krb5_context context, const krb5_kdc_req *request,
++                    const krb5_db_entry *server, const krb5_ticket *ticket,
++                    krb5_data *const *auth_indicators, krb5_timestamp kdc_time,
++                    krb5_ticket_times *times, const char **status)
+ {
+-#if 0
+-    /*
+-     * For example, if your site wants to disallow ticket forwarding,
+-     * you might do something like this:
+-     */
++    krb5_deltat life, rlife;
++    krb5_error_code ret;
++    kdcpolicy_handle *hp, h;
++    char **ais = NULL;
+ 
+-    if (isflagset(request->kdc_options, KDC_OPT_FORWARDED)) {
+-        *status = "FORWARD POLICY";
+-        return KRB5KDC_ERR_POLICY;
++    *status = NULL;
++
++    ret = authind_strings(auth_indicators, &ais);
++    if (ret)
++        goto done;
++
++    for (hp = handles; *hp != NULL; hp++) {
++        h = *hp;
++        if (h->vt.check_tgs == NULL)
++            continue;
++
++        ret = h->vt.check_tgs(context, h->moddata, request, server, ticket,
++                              (const char **)ais, status, &life, &rlife);
++        if (ret)
++            goto done;
++
++        update_ticket_times(times, kdc_time, life, rlife);
+     }
+-#endif
+ 
+-    return 0;                           /* not against policy */
++done:
++    free_indicators(ais);
++    return ret;
++}
++
++void
++unload_kdcpolicy_plugins(krb5_context context)
++{
++    kdcpolicy_handle *hp, h;
++
++    for (hp = handles; *hp != NULL; hp++) {
++        h = *hp;
++        if (h->vt.fini != NULL)
++            h->vt.fini(context, h->moddata);
++        free(h);
++    }
++    free(handles);
++    handles = NULL;
++}
++
++krb5_error_code
++load_kdcpolicy_plugins(krb5_context context)
++{
++    krb5_error_code ret;
++    krb5_plugin_initvt_fn *modules = NULL, *mod;
++    kdcpolicy_handle h;
++    size_t count;
++
++    ret = k5_plugin_load_all(context, PLUGIN_INTERFACE_KDCPOLICY, &modules);
++    if (ret)
++        goto cleanup;
++
++    for (count = 0; modules[count] != NULL; count++);
++    handles = k5calloc(count + 1, sizeof(*handles), &ret);
++    if (handles == NULL)
++        goto cleanup;
++
++    count = 0;
++    for (mod = modules; *mod != NULL; mod++) {
++        h = k5calloc(1, sizeof(*h), &ret);
++        if (h == NULL)
++            goto cleanup;
++
++        ret = (*mod)(context, 1, 1, (krb5_plugin_vtable)&h->vt);
++        if (ret) {              /* Version mismatch. */
++            TRACE_KDCPOLICY_VTINIT_FAIL(context, ret);
++            free(h);
++            continue;
++        }
++        if (h->vt.init != NULL) {
++            ret = h->vt.init(context, &h->moddata);
++            if (ret == KRB5_PLUGIN_NO_HANDLE) {
++                TRACE_KADM5_AUTH_INIT_SKIP(context, h->vt.name);
++                free(h);
++                continue;
++            }
++            if (ret) {
++                kdc_err(context, ret, _("while loading policy module %s"),
++                        h->vt.name);
++                free(h);
++                goto cleanup;
++            }
++        }
++        handles[count++] = h;
++    }
++
++    ret = 0;
++
++cleanup:
++    if (ret)
++        unload_kdcpolicy_plugins(context);
++    k5_plugin_free_modules(context, modules);
++    return ret;
+ }
+diff --git a/src/kdc/policy.h b/src/kdc/policy.h
+index 6b000dc90..2a57b0a01 100644
+--- a/src/kdc/policy.h
++++ b/src/kdc/policy.h
+@@ -26,11 +26,22 @@
+ #ifndef __KRB5_KDC_POLICY__
+ #define __KRB5_KDC_POLICY__
+ 
+-extern int against_postdate_policy (krb5_timestamp);
++krb5_error_code
++load_kdcpolicy_plugins(krb5_context context);
+ 
+-extern int against_flag_policy_as (const krb5_kdc_req *);
++void
++unload_kdcpolicy_plugins(krb5_context context);
+ 
+-extern int against_flag_policy_tgs (const krb5_kdc_req *,
+-                                    const krb5_ticket *);
++krb5_error_code
++check_kdcpolicy_as(krb5_context context, const krb5_kdc_req *request,
++                   const krb5_db_entry *client, const krb5_db_entry *server,
++                   krb5_data *const *auth_indicators, krb5_timestamp kdc_time,
++                   krb5_ticket_times *times, const char **status);
++
++krb5_error_code
++check_kdcpolicy_tgs(krb5_context context, const krb5_kdc_req *request,
++                    const krb5_db_entry *server, const krb5_ticket *ticket,
++                    krb5_data *const *auth_indicators, krb5_timestamp kdc_time,
++                    krb5_ticket_times *times, const char **status);
+ 
+ #endif /* __KRB5_KDC_POLICY__ */
+diff --git a/src/kdc/tgs_policy.c b/src/kdc/tgs_policy.c
+index d0f25d1b7..33cfbcd81 100644
+--- a/src/kdc/tgs_policy.c
++++ b/src/kdc/tgs_policy.c
+@@ -375,11 +375,5 @@ validate_tgs_request(kdc_realm_t *kdc_active_realm,
+     if (ret && ret != KRB5_PLUGIN_OP_NOTSUPP)
+         return errcode_to_protocol(ret);
+ 
+-    /* Check local policy. */
+-    errcode = against_local_policy_tgs(request, server, ticket,
+-                                       status, e_data);
+-    if (errcode)
+-        return errcode;
+-
+     return 0;
+ }
+diff --git a/src/lib/krb5/krb/plugin.c b/src/lib/krb5/krb/plugin.c
+index 17dd6bd30..31aaf661d 100644
+--- a/src/lib/krb5/krb/plugin.c
++++ b/src/lib/krb5/krb/plugin.c
+@@ -58,7 +58,9 @@ const char *interface_names[] = {
+     "audit",
+     "tls",
+     "kdcauthdata",
+-    "certauth"
++    "certauth",
++    "kadm5_auth",
++    "kdcpolicy",
+ };
+ 
+ /* Return the context's interface structure for id, or NULL if invalid. */
+diff --git a/src/plugins/kdcpolicy/test/Makefile.in b/src/plugins/kdcpolicy/test/Makefile.in
+new file mode 100644
+index 000000000..b81f1a7ce
+--- /dev/null
++++ b/src/plugins/kdcpolicy/test/Makefile.in
+@@ -0,0 +1,20 @@
++mydir=plugins$(S)policy$(S)test
++BUILDTOP=$(REL)..$(S)..$(S)..
++
++LIBBASE=policy_test
++LIBMAJOR=0
++LIBMINOR=0
++RELDIR=../plugins/kdcpolicy/test
++SHLIB_EXPDEPS=$(KRB5_BASE_DEPLIBS)
++SHLIB_EXPLIBS=$(KRB5_BASE_LIBS)
++
++STLIBOBJS=main.o
++
++SRCS=$(srcdir)/main.c
++
++all-unix: all-libs
++install-unix:
++clean-unix:: clean-libs clean-libobjs
++
++@libnover_frag@
++@libobj_frag@
+diff --git a/src/plugins/kdcpolicy/test/deps b/src/plugins/kdcpolicy/test/deps
+new file mode 100644
+index 000000000..e69de29bb
+diff --git a/src/plugins/kdcpolicy/test/main.c b/src/plugins/kdcpolicy/test/main.c
+new file mode 100644
+index 000000000..eb8fde053
+--- /dev/null
++++ b/src/plugins/kdcpolicy/test/main.c
+@@ -0,0 +1,111 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* include/krb5/kdcpolicy_plugin.h - KDC policy plugin interface */
++/*
++ * Copyright (C) 2017 by Red Hat, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "k5-int.h"
++#include "kdb.h"
++#include <krb5/kdcpolicy_plugin.h>
++
++static krb5_error_code
++output_from_indicator(const char *const *auth_indicators,
++                      krb5_deltat *lifetime_out,
++                      krb5_deltat *renew_lifetime_out,
++                      const char **status)
++{
++    if (auth_indicators[0] == NULL) {
++        *status = NULL;
++        return 0;
++    }
++
++    if (strcmp(auth_indicators[0], "ONE_HOUR") == 0) {
++        *lifetime_out = 3600;
++        *renew_lifetime_out = *lifetime_out * 2;
++        return 0;
++    } else if (strcmp(auth_indicators[0], "SEVEN_HOURS") == 0) {
++        *lifetime_out = 7 * 3600;
++        *renew_lifetime_out = *lifetime_out * 2;
++        return 0;
++    }
++
++    *status = "LOCAL_POLICY";
++    return KRB5KDC_ERR_POLICY;
++}
++
++static krb5_error_code
++test_check_as(krb5_context context, krb5_kdcpolicy_moddata moddata,
++              const krb5_kdc_req *request, const krb5_db_entry *client,
++              const krb5_db_entry *server, const char *const *auth_indicators,
++              const char **status, krb5_deltat *lifetime_out,
++              krb5_deltat *renew_lifetime_out)
++{
++    if (request->client != NULL && request->client->length >= 1 &&
++        data_eq_string(request->client->data[0], "fail")) {
++        *status = "LOCAL_POLICY";
++        return KRB5KDC_ERR_POLICY;
++    }
++    return output_from_indicator(auth_indicators, lifetime_out,
++                                 renew_lifetime_out, status);
++}
++
++static krb5_error_code
++test_check_tgs(krb5_context context, krb5_kdcpolicy_moddata moddata,
++               const krb5_kdc_req *request, const krb5_db_entry *server,
++               const krb5_ticket *ticket, const char *const *auth_indicators,
++               const char **status, krb5_deltat *lifetime_out,
++               krb5_deltat *renew_lifetime_out)
++{
++    if (request->server != NULL && request->server->length >= 1 &&
++        data_eq_string(request->server->data[0], "fail")) {
++        *status = "LOCAL_POLICY";
++        return KRB5KDC_ERR_POLICY;
++    }
++    return output_from_indicator(auth_indicators, lifetime_out,
++                                 renew_lifetime_out, status);
++}
++
++krb5_error_code
++kdcpolicy_test_initvt(krb5_context context, int maj_ver, int min_ver,
++                      krb5_plugin_vtable vtable);
++krb5_error_code
++kdcpolicy_test_initvt(krb5_context context, int maj_ver, int min_ver,
++                      krb5_plugin_vtable vtable)
++{
++    krb5_kdcpolicy_vtable vt;
++
++    if (maj_ver != 1)
++        return KRB5_PLUGIN_VER_NOTSUPP;
++
++    vt = (krb5_kdcpolicy_vtable)vtable;
++    vt->name = "test";
++    vt->check_as = test_check_as;
++    vt->check_tgs = test_check_tgs;
++    return 0;
++}
+diff --git a/src/plugins/kdcpolicy/test/policy_test.exports b/src/plugins/kdcpolicy/test/policy_test.exports
+new file mode 100644
+index 000000000..9682ec74f
+--- /dev/null
++++ b/src/plugins/kdcpolicy/test/policy_test.exports
+@@ -0,0 +1 @@
++kdcpolicy_test_initvt
+diff --git a/src/tests/Makefile.in b/src/tests/Makefile.in
+index 2b3112537..a2093108b 100644
+--- a/src/tests/Makefile.in
++++ b/src/tests/Makefile.in
+@@ -169,6 +169,7 @@ check-pytests: localauth plugorder rdreq responder s2p s4u2proxy unlockiter
+ 	$(RUNPYTEST) $(srcdir)/t_tabdump.py $(PYTESTFLAGS)
+ 	$(RUNPYTEST) $(srcdir)/t_certauth.py $(PYTESTFLAGS)
+ 	$(RUNPYTEST) $(srcdir)/t_y2038.py $(PYTESTFLAGS)
++	$(RUNPYTEST) $(srcdir)/t_kdcpolicy.py $(PYTESTFLAGS)
+ 
+ clean:
+ 	$(RM) adata etinfo forward gcred hist hooks hrealm icred kdbtest
+diff --git a/src/tests/t_kdcpolicy.py b/src/tests/t_kdcpolicy.py
+new file mode 100644
+index 000000000..6a745b959
+--- /dev/null
++++ b/src/tests/t_kdcpolicy.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/python
++from k5test import *
++from datetime import datetime
++import re
++
++testpreauth = os.path.join(buildtop, 'plugins', 'preauth', 'test', 'test.so')
++testpolicy = os.path.join(buildtop, 'plugins', 'kdcpolicy', 'test',
++                          'policy_test.so')
++krb5_conf = {'plugins': {'kdcpreauth': {'module': 'test:' + testpreauth},
++                         'clpreauth': {'module': 'test:' + testpreauth},
++                         'kdcpolicy': {'module': 'test:' + testpolicy}}}
++kdc_conf = {'realms': {'$realm': {'default_principal_flags': '+preauth',
++                                  'max_renewable_life': '1d'}}}
++realm = K5Realm(krb5_conf=krb5_conf, kdc_conf=kdc_conf)
++
++realm.run([kadminl, 'addprinc', '-pw', password('fail'), 'fail'])
++
++def verify_time(out, target_time):
++    times = re.findall(r'\d\d/\d\d/\d\d \d\d:\d\d:\d\d', out)
++    times = [datetime.strptime(t, '%m/%d/%y %H:%M:%S') for t in times]
++    while len(times) > 0:
++        starttime = times.pop(0)
++        endtime = times.pop(0)
++        renewtime = times.pop(0)
++
++        if str(endtime - starttime) != target_time:
++            fail('unexpected lifetime value')
++        if str(renewtime - endtime) != target_time:
++            fail('unexpected renewable value')
++
++rflags = ['-r', '1d', '-l', '12h']
++
++# Test AS+TGS success path.
++realm.kinit(realm.user_princ, password('user'),
++            rflags + ['-X', 'indicators=SEVEN_HOURS'])
++realm.run([kvno, realm.host_princ])
++realm.run(['./adata', realm.host_princ], expected_msg='+97: [SEVEN_HOURS]')
++out = realm.run([klist, realm.ccache, '-e'])
++verify_time(out, '7:00:00')
++
++# Test AS+TGS success path with different values.
++realm.kinit(realm.user_princ, password('user'),
++            rflags + ['-X', 'indicators=ONE_HOUR'])
++realm.run([kvno, realm.host_princ])
++realm.run(['./adata', realm.host_princ], expected_msg='+97: [ONE_HOUR]')
++out = realm.run([klist, realm.ccache, '-e'])
++verify_time(out, '1:00:00')
++
++# Test TGS failure path (using previous creds).
++realm.run([kvno, 'fail@%s' % realm.realm], expected_code=1,
++          expected_msg='KDC policy rejects request')
++
++# Test AS failure path.
++realm.kinit('fail@%s' % realm.realm, password('fail'),
++            expected_code=1, expected_msg='KDC policy rejects request')
++
++success('kdcpolicy tests')

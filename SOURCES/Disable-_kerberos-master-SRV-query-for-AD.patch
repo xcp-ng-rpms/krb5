@@ -1,0 +1,35 @@
+From c72b15abf007f06970f95630bb73f93a0ee20e9c Mon Sep 17 00:00:00 2001
+From: rpm-build <rpm-build>
+Date: Mon, 30 Jun 2025 08:01:39 +0000
+Subject: [PATCH] CA-413120: Disable _kerberos-master SRV query for AD
+
+From
+https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/c1987d42-1847-4cc9-acf7-aab2136d6952
+we can see "_kerberos-master" is not supported by AD at all, so
+need to disable the DNS SRV records query, otherwise there will
+be many invalid queries occur:
+  > Standard query 0x1adb SRV _kerberos-master._udp.<domain>
+  < Standard query response 0x1adb No such name SRV
+
+Signed-off-by: Deli Zhang <deli.zhang@cloud.com>
+---
+ src/lib/krb5/os/locate_kdc.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/lib/krb5/os/locate_kdc.c b/src/lib/krb5/os/locate_kdc.c
+index edca5ac..d894d9e 100644
+--- a/src/lib/krb5/os/locate_kdc.c
++++ b/src/lib/krb5/os/locate_kdc.c
+@@ -714,7 +714,8 @@ dns_locate_server_srv(krb5_context context, const krb5_data *realm,
+         break;
+     case locate_service_primary_kdc:
+         dnsname = "_kerberos-master";
+-        break;
++        /* Unavailable in AD, so skip actual DNS query. */
++        return 0;
+     case locate_service_kadmin:
+         dnsname = "_kerberos-adm";
+         break;
+-- 
+2.47.1
+

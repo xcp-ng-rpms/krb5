@@ -1,0 +1,327 @@
+From f181bf6ee4ff66489895a8c543521cbec253d1f9 Mon Sep 17 00:00:00 2001
+From: Greg Hudson <ghudson@mit.edu>
+Date: Wed, 17 May 2017 15:14:15 -0400
+Subject: [PATCH] Use krb5_timestamp where appropriate
+
+Where krb5_int32 is used to hold the number of seconds since the
+epoch, use krb5_timestamp instead.
+
+(cherry picked from commit ae25f6ec5558140a546db34fea389412d81c0631)
+---
+ src/clients/klist/klist.c          |  2 +-
+ src/include/k5-int.h               |  2 +-
+ src/kadmin/server/misc.c           |  2 +-
+ src/kdc/dispatch.c                 |  4 ++--
+ src/lib/kadm5/srv/server_acl.c     |  2 +-
+ src/lib/kadm5/srv/server_kdb.c     |  2 +-
+ src/lib/kadm5/srv/svr_principal.c  | 10 +++++-----
+ src/lib/krb5/krb/gen_save_subkey.c |  3 ++-
+ src/lib/krb5/krb/get_in_tkt.c      |  2 +-
+ src/lib/krb5/krb/init_ctx.c        |  3 ++-
+ src/lib/krb5/os/c_ustime.c         |  7 +++++--
+ src/lib/krb5/os/toffset.c          |  3 ++-
+ src/lib/krb5/os/trace.c            |  3 ++-
+ src/lib/krb5/os/ustime.c           |  3 ++-
+ src/lib/krb5/rcache/rc_dfl.c       | 10 +++++-----
+ src/tests/create/kdb5_mkdums.c     |  2 +-
+ 16 files changed, 34 insertions(+), 26 deletions(-)
+
+diff --git a/src/clients/klist/klist.c b/src/clients/klist/klist.c
+index ffeecc394..4334415be 100644
+--- a/src/clients/klist/klist.c
++++ b/src/clients/klist/klist.c
+@@ -56,7 +56,7 @@ int show_adtype = 0, show_all = 0, list_all = 0, use_client_keytab = 0;
+ int show_config = 0;
+ char *defname;
+ char *progname;
+-krb5_int32 now;
++krb5_timestamp now;
+ unsigned int timestamp_width;
+ 
+ krb5_context kcontext;
+diff --git a/src/include/k5-int.h b/src/include/k5-int.h
+index 82ee20760..ed9c7bf75 100644
+--- a/src/include/k5-int.h
++++ b/src/include/k5-int.h
+@@ -721,7 +721,7 @@ krb5_error_code krb5int_c_copy_keyblock_contents(krb5_context context,
+                                                  const krb5_keyblock *from,
+                                                  krb5_keyblock *to);
+ 
+-krb5_error_code krb5_crypto_us_timeofday(krb5_int32 *, krb5_int32 *);
++krb5_error_code krb5_crypto_us_timeofday(krb5_timestamp *, krb5_int32 *);
+ 
+ /*
+  * End "los-proto.h"
+diff --git a/src/kadmin/server/misc.c b/src/kadmin/server/misc.c
+index a75b65a26..ba672d714 100644
+--- a/src/kadmin/server/misc.c
++++ b/src/kadmin/server/misc.c
+@@ -159,7 +159,7 @@ kadm5_ret_t
+ check_min_life(void *server_handle, krb5_principal principal,
+                char *msg_ret, unsigned int msg_len)
+ {
+-    krb5_int32                  now;
++    krb5_timestamp              now;
+     kadm5_ret_t                 ret;
+     kadm5_policy_ent_rec        pol;
+     kadm5_principal_ent_rec     princ;
+diff --git a/src/kdc/dispatch.c b/src/kdc/dispatch.c
+index 16a35d2be..4ecc23481 100644
+--- a/src/kdc/dispatch.c
++++ b/src/kdc/dispatch.c
+@@ -94,8 +94,8 @@ static void
+ reseed_random(krb5_context kdc_err_context)
+ {
+     krb5_error_code retval;
+-    krb5_int32 now, now_usec;
+-    krb5_int32 usec_difference;
++    krb5_timestamp now;
++    krb5_int32 now_usec, usec_difference;
+     krb5_data data;
+ 
+     retval = krb5_crypto_us_timeofday(&now, &now_usec);
+diff --git a/src/lib/kadm5/srv/server_acl.c b/src/lib/kadm5/srv/server_acl.c
+index 656dddff5..c2cf69169 100644
+--- a/src/lib/kadm5/srv/server_acl.c
++++ b/src/lib/kadm5/srv/server_acl.c
+@@ -375,7 +375,7 @@ kadm5int_acl_impose_restrictions(kcontext, recp, maskp, rp)
+     restriction_t              *rp;
+ {
+     krb5_error_code     code;
+-    krb5_int32          now;
++    krb5_timestamp      now;
+ 
+     DPRINT(DEBUG_CALLS, acl_debug_level,
+            ("* kadm5int_acl_impose_restrictions(..., *maskp=0x%08x, rp=0x%08x)\n",
+diff --git a/src/lib/kadm5/srv/server_kdb.c b/src/lib/kadm5/srv/server_kdb.c
+index 612553ba3..f4b8aef2b 100644
+--- a/src/lib/kadm5/srv/server_kdb.c
++++ b/src/lib/kadm5/srv/server_kdb.c
+@@ -365,7 +365,7 @@ kdb_put_entry(kadm5_server_handle_t handle,
+               krb5_db_entry *kdb, osa_princ_ent_rec *adb)
+ {
+     krb5_error_code ret;
+-    krb5_int32 now;
++    krb5_timestamp now;
+     XDR xdrs;
+     krb5_tl_data tl_data;
+ 
+diff --git a/src/lib/kadm5/srv/svr_principal.c b/src/lib/kadm5/srv/svr_principal.c
+index f4a9a2ad2..0d4f0a632 100644
+--- a/src/lib/kadm5/srv/svr_principal.c
++++ b/src/lib/kadm5/srv/svr_principal.c
+@@ -296,7 +296,7 @@ kadm5_create_principal_3(void *server_handle,
+     osa_princ_ent_rec           adb;
+     kadm5_policy_ent_rec        polent;
+     krb5_boolean                have_polent = FALSE;
+-    krb5_int32                  now;
++    krb5_timestamp              now;
+     krb5_tl_data                *tl_data_tail;
+     unsigned int                ret;
+     kadm5_server_handle_t handle = server_handle;
+@@ -1322,7 +1322,7 @@ kadm5_chpass_principal_3(void *server_handle,
+                          int n_ks_tuple, krb5_key_salt_tuple *ks_tuple,
+                          char *password)
+ {
+-    krb5_int32                  now;
++    krb5_timestamp              now;
+     kadm5_policy_ent_rec        pol;
+     osa_princ_ent_rec           adb;
+     krb5_db_entry               *kdb;
+@@ -1544,7 +1544,7 @@ kadm5_randkey_principal_3(void *server_handle,
+ {
+     krb5_db_entry               *kdb;
+     osa_princ_ent_rec           adb;
+-    krb5_int32                  now;
++    krb5_timestamp              now;
+     kadm5_policy_ent_rec        pol;
+     int                         ret, last_pwd, n_new_keys;
+     krb5_boolean                have_pol = FALSE;
+@@ -1686,7 +1686,7 @@ kadm5_setv4key_principal(void *server_handle,
+ {
+     krb5_db_entry               *kdb;
+     osa_princ_ent_rec           adb;
+-    krb5_int32                  now;
++    krb5_timestamp              now;
+     kadm5_policy_ent_rec        pol;
+     krb5_keysalt                keysalt;
+     int                         i, kvno, ret;
+@@ -1888,7 +1888,7 @@ kadm5_setkey_principal_4(void *server_handle, krb5_principal principal,
+ {
+     krb5_db_entry *kdb;
+     osa_princ_ent_rec adb;
+-    krb5_int32 now;
++    krb5_timestamp now;
+     kadm5_policy_ent_rec pol;
+     krb5_key_data *new_key_data = NULL;
+     int i, j, ret, n_new_key_data = 0;
+diff --git a/src/lib/krb5/krb/gen_save_subkey.c b/src/lib/krb5/krb/gen_save_subkey.c
+index 61f36aa36..bc2c46d30 100644
+--- a/src/lib/krb5/krb/gen_save_subkey.c
++++ b/src/lib/krb5/krb/gen_save_subkey.c
+@@ -38,7 +38,8 @@ k5_generate_and_save_subkey(krb5_context context,
+        to guarantee randomness, but to make it less likely that multiple
+        sessions could pick the same subkey.  */
+     struct {
+-        krb5_int32 sec, usec;
++        krb5_timestamp sec;
++        krb5_int32 usec;
+     } rnd_data;
+     krb5_data d;
+     krb5_error_code retval;
+diff --git a/src/lib/krb5/krb/get_in_tkt.c b/src/lib/krb5/krb/get_in_tkt.c
+index 40aba1905..7178bd87b 100644
+--- a/src/lib/krb5/krb/get_in_tkt.c
++++ b/src/lib/krb5/krb/get_in_tkt.c
+@@ -1788,7 +1788,7 @@ k5_populate_gic_opt(krb5_context context, krb5_get_init_creds_opt **out,
+                     krb5_creds *creds)
+ {
+     int i;
+-    krb5_int32 starttime;
++    krb5_timestamp starttime;
+     krb5_deltat lifetime;
+     krb5_get_init_creds_opt *opt;
+     krb5_error_code retval;
+diff --git a/src/lib/krb5/krb/init_ctx.c b/src/lib/krb5/krb/init_ctx.c
+index cf226fdba..4246c5dd2 100644
+--- a/src/lib/krb5/krb/init_ctx.c
++++ b/src/lib/krb5/krb/init_ctx.c
+@@ -139,7 +139,8 @@ krb5_init_context_profile(profile_t profile, krb5_flags flags,
+     krb5_context ctx = 0;
+     krb5_error_code retval;
+     struct {
+-        krb5_int32 now, now_usec;
++        krb5_timestamp now;
++        krb5_int32 now_usec;
+         long pid;
+     } seed_data;
+     krb5_data seed;
+diff --git a/src/lib/krb5/os/c_ustime.c b/src/lib/krb5/os/c_ustime.c
+index 68fb381f4..f69f2ea4c 100644
+--- a/src/lib/krb5/os/c_ustime.c
++++ b/src/lib/krb5/os/c_ustime.c
+@@ -29,7 +29,10 @@
+ 
+ k5_mutex_t krb5int_us_time_mutex = K5_MUTEX_PARTIAL_INITIALIZER;
+ 
+-struct time_now { krb5_int32 sec, usec; };
++struct time_now {
++    krb5_timestamp sec;
++    krb5_int32 usec;
++};
+ 
+ #if defined(_WIN32)
+ 
+@@ -73,7 +76,7 @@ get_time_now(struct time_now *n)
+ static struct time_now last_time;
+ 
+ krb5_error_code
+-krb5_crypto_us_timeofday(krb5_int32 *seconds, krb5_int32 *microseconds)
++krb5_crypto_us_timeofday(krb5_timestamp *seconds, krb5_int32 *microseconds)
+ {
+     struct time_now now;
+     krb5_error_code err;
+diff --git a/src/lib/krb5/os/toffset.c b/src/lib/krb5/os/toffset.c
+index 37bc69f49..4bbcdde52 100644
+--- a/src/lib/krb5/os/toffset.c
++++ b/src/lib/krb5/os/toffset.c
+@@ -40,7 +40,8 @@ krb5_error_code KRB5_CALLCONV
+ krb5_set_real_time(krb5_context context, krb5_timestamp seconds, krb5_int32 microseconds)
+ {
+     krb5_os_context os_ctx = &context->os_context;
+-    krb5_int32 sec, usec;
++    krb5_timestamp sec;
++    krb5_int32 usec;
+     krb5_error_code retval;
+ 
+     retval = krb5_crypto_us_timeofday(&sec, &usec);
+diff --git a/src/lib/krb5/os/trace.c b/src/lib/krb5/os/trace.c
+index 74c315c90..8750b7650 100644
+--- a/src/lib/krb5/os/trace.c
++++ b/src/lib/krb5/os/trace.c
+@@ -340,7 +340,8 @@ krb5int_trace(krb5_context context, const char *fmt, ...)
+     va_list ap;
+     krb5_trace_info info;
+     char *str = NULL, *msg = NULL;
+-    krb5_int32 sec, usec;
++    krb5_timestamp sec;
++    krb5_int32 usec;
+ 
+     if (context == NULL || context->trace_callback == NULL)
+         return;
+diff --git a/src/lib/krb5/os/ustime.c b/src/lib/krb5/os/ustime.c
+index 1c1b571eb..a80fdf68c 100644
+--- a/src/lib/krb5/os/ustime.c
++++ b/src/lib/krb5/os/ustime.c
+@@ -40,7 +40,8 @@ krb5_error_code
+ k5_time_with_offset(krb5_timestamp offset, krb5_int32 offset_usec,
+                     krb5_timestamp *time_out, krb5_int32 *usec_out)
+ {
+-    krb5_int32 sec, usec;
++    krb5_timestamp sec;
++    krb5_int32 usec;
+     krb5_error_code retval;
+ 
+     retval = krb5_crypto_us_timeofday(&sec, &usec);
+diff --git a/src/lib/krb5/rcache/rc_dfl.c b/src/lib/krb5/rcache/rc_dfl.c
+index 6b043844d..41ebf94da 100644
+--- a/src/lib/krb5/rcache/rc_dfl.c
++++ b/src/lib/krb5/rcache/rc_dfl.c
+@@ -93,7 +93,7 @@ cmp(krb5_donot_replay *old, krb5_donot_replay *new1, krb5_deltat t)
+ }
+ 
+ static int
+-alive(krb5_int32 mytime, krb5_donot_replay *new1, krb5_deltat t)
++alive(krb5_timestamp mytime, krb5_donot_replay *new1, krb5_deltat t)
+ {
+     if (mytime == 0)
+         return CMP_HOHUM; /* who cares? */
+@@ -129,7 +129,7 @@ struct authlist
+ 
+ static int
+ rc_store(krb5_context context, krb5_rcache id, krb5_donot_replay *rep,
+-         krb5_int32 now, krb5_boolean fromfile)
++         krb5_timestamp now, krb5_boolean fromfile)
+ {
+     struct dfl_data *t = (struct dfl_data *)id->data;
+     unsigned int rephash;
+@@ -536,7 +536,7 @@ krb5_rc_dfl_recover_locked(krb5_context context, krb5_rcache id)
+     krb5_error_code retval;
+     long max_size;
+     int expired_entries = 0;
+-    krb5_int32 now;
++    krb5_timestamp now;
+ 
+     if ((retval = krb5_rc_io_open(context, &t->d, t->name))) {
+         return retval;
+@@ -706,7 +706,7 @@ krb5_rc_dfl_store(krb5_context context, krb5_rcache id, krb5_donot_replay *rep)
+ {
+     krb5_error_code ret;
+     struct dfl_data *t;
+-    krb5_int32 now;
++    krb5_timestamp now;
+ 
+     ret = krb5_timeofday(context, &now);
+     if (ret)
+@@ -762,7 +762,7 @@ krb5_rc_dfl_expunge_locked(krb5_context context, krb5_rcache id)
+     struct authlist **qt;
+     struct authlist *r;
+     struct authlist *rt;
+-    krb5_int32 now;
++    krb5_timestamp now;
+ 
+     if (krb5_timestamp(context, &now))
+         now = 0;
+diff --git a/src/tests/create/kdb5_mkdums.c b/src/tests/create/kdb5_mkdums.c
+index 622f549f9..7c0666601 100644
+--- a/src/tests/create/kdb5_mkdums.c
++++ b/src/tests/create/kdb5_mkdums.c
+@@ -247,7 +247,7 @@ add_princ(context, str_newprinc)
+ 
+     {
+         /* Add mod princ to db entry */
+-        krb5_int32 now;
++        krb5_timestamp now;
+ 
+         retval = krb5_timeofday(context, &now);
+         if (retval) {

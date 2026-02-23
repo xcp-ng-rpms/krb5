@@ -1,0 +1,36 @@
+From 498b43b1a58795773834c1c5bb2b61dd801b9a03 Mon Sep 17 00:00:00 2001
+From: Greg Hudson <ghudson@mit.edu>
+Date: Sat, 22 Apr 2017 16:51:23 -0400
+Subject: [PATCH] Allow clock skew in krb5 gss_context_time()
+
+Commit b496ce4095133536e0ace36b74130e4b9ecb5e11 (ticket #8268) adds
+the clock skew to krb5 acceptor context lifetimes for
+gss_accept_sec_context() and gss_inquire_context(), but not for
+gss_context_time().  Add the clock skew in gss_context_time() as well.
+
+ticket: 8581 (new)
+target_version: 1.14-next
+target_version: 1.15-next
+tags: pullup
+
+(cherry picked from commit b0a072e6431261734e7350996a363801f180e8ea)
+---
+ src/lib/gssapi/krb5/context_time.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/lib/gssapi/krb5/context_time.c b/src/lib/gssapi/krb5/context_time.c
+index a18cfb05b..450593288 100644
+--- a/src/lib/gssapi/krb5/context_time.c
++++ b/src/lib/gssapi/krb5/context_time.c
+@@ -51,7 +51,10 @@ krb5_gss_context_time(minor_status, context_handle, time_rec)
+         return(GSS_S_FAILURE);
+     }
+ 
+-    if ((lifetime = ctx->krb_times.endtime - now) <= 0) {
++    lifetime = ctx->krb_times.endtime - now;
++    if (!ctx->initiate)
++        lifetime += ctx->k5_context->clockskew;
++    if (lifetime <= 0) {
+         *time_rec = 0;
+         *minor_status = 0;
+         return(GSS_S_CONTEXT_EXPIRED);
