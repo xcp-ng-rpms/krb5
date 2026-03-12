@@ -4,6 +4,6 @@
     monthly
     rotate 12
     postrotate
-	/bin/kill -HUP `cat /var/run/krb5kdc.pid 2>/dev/null` 2> /dev/null || true
+        systemctl reload krb5kdc.service || true
     endscript
 }
