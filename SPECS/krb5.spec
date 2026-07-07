@@ -54,7 +54,7 @@
 Summary: The Kerberos network authentication system
 Name: krb5
 Version: %{krb5_version}
-Release: %{?xsrel}.1%{?dist}
+Release: %{?xsrel}.1~XCPNG2698.1%{?dist}
 
 # rharwood has trust path to signing key and verifies on check-in
 Source0: krb5-1.21.3.tar.gz
